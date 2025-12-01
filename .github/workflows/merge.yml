@@ -33,12 +33,18 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: write
+
 jobs:
   merge:
     runs-on: ubuntu-latest
     
     steps:
       - uses: actions/checkout@v4
+        with:
+          # CRITICAL FIX for stuck counter: Fetch full history for robust pushing
+          fetch-depth: 0 
       
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -76,15 +82,30 @@ jobs:
             --exclude-count ${{ github.event.inputs.exclude_count }} \
             --target-minutes ${{ github.event.inputs.target_minutes }}
             
+      - name: Commit and Push Counter Update
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Add the counter file updated by the Python script
+          git add .github/merge_bundle_counter.txt
+          
+          if git diff --staged --quiet; then
+            echo "No changes to counter."
+          else
+            # Commit using the new counter value written by Python
+            git commit -m "Increment bundle counter to $(cat .github/merge_bundle_counter.txt)"
+            
+            # Push the update
+            git push
+          fi
+            
       - name: Create ZIP artifact
         run: |
           BUNDLE="${BUNDLE_SEQ:-1}"
           
-          # Check if the counter file exists and read the updated counter (post-script execution)
-          if [ -f .github/merge_bundle_counter.txt ]; then
-            BUNDLE=$(cat .github/merge_bundle_counter.txt 2>/dev/null || echo "")
-            BUNDLE=${BUNDLE:-1}
-          fi
+          # Use the environment variable for the zip name, which is the starting counter for the run
+          BUNDLE=${BUNDLE_SEQ}
           
           OUTPUT_BASE="merged_bundle_${BUNDLE}"
           
@@ -95,7 +116,6 @@ jobs:
               (cd output && zip -r "../${OUTPUT_BASE}.zip" "${OUTPUT_BASE}") || true
               ls -lh "${OUTPUT_BASE}.zip" || true
               echo "ZIP_NAME=${OUTPUT_BASE}.zip" >> "$GITHUB_ENV"
-              echo "✅ Successfully created zip with $(find output/${OUTPUT_BASE} -type f | wc -l) files"
             else
               echo "⚠️ Output directory is empty"
               touch empty_placeholder.txt
@@ -111,7 +131,7 @@ jobs:
           
       - name: Upload merged ZIP artifact
         if: always()
-        uses: actions/upload-artifact@v4 # <-- **CRITICAL FIX: Updated to v4**
+        uses: actions/upload-artifact@v4
         with:
           name: merged_macros_${{ env.BUNDLE_SEQ }}
           path: ${{ env.ZIP_NAME }}
