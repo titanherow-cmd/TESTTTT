@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness (Final Patch + Detailed Manifest)"""
+"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness (Strict Exclusion & Global Pool)"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -242,6 +242,7 @@ def locate_special_file(folder: Path, input_root: Path):
     return None
 
 def copy_always_files_unmodified(files, out_folder_for_group: Path):
+    # Modified strict check: any file starting with "always first" or "always last"
     always_files = [f for f in files if Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
     if not always_files: return []
     copied_paths = []
@@ -476,140 +477,122 @@ def add_afk_pause(events, rng, max_allowed_ms):
     return evs, afk_ms
     
 # ==============================================================================
-# SELECTOR & MAIN LOGIC (PATCHED DURATION LOGIC & EXCLUSION & DETAILED MANIFEST)
+# SELECTOR & MAIN LOGIC (GLOBAL POOL & STRICT UNIQUE SELECTION)
 # ==============================================================================
 
-class NonRepeatingSelector:
-    def __init__(self, rng):
+class GlobalFileSelector:
+    def __init__(self, rng, all_files):
         self.rng = rng
-        self.used_combos = set()
-        self.used_files = set()
-    
-    def select_unique_files_for_time(self, files, target_minutes):
-        """
-        Selects files until the target duration is reached, reusing files if necessary.
-        Prioritizes TIME over file count.
-        Attempts to pick files that fit the remaining time best if possible.
-        """
-        if not files:
-            return []
-            
-        file_durations = {}
-        for f in files:
+        self.all_files = all_files
+        self.global_used_files = set() # Tracks usage across ALL merged versions
+        self.current_pool = list(all_files) # Active pool for selection
+        self.rng.shuffle(self.current_pool)
+        
+        # Calculate base durations once
+        self.file_durations = {}
+        for f in all_files:
             try:
                 evs = load_json_events(Path(f))
                 _, base_dur = process_macro_file(evs) 
-                file_durations[f] = base_dur / 60000.0 # minutes
+                self.file_durations[f] = base_dur / 60000.0 # minutes
             except:
-                file_durations[f] = 2.0 # fallback
-        
-        # Inter-file pause average (approx 5 sec = 0.08 min)
-        AVG_INTER_FILE_PAUSE_MIN = 0.08 
-        
-        selected = []
+                self.file_durations[f] = 2.0 # fallback
+
+    def get_files_for_time(self, target_minutes):
+        """
+        Selects unique files for ONE merged version to meet target time.
+        - Prioritizes using unused files from the global pool.
+        - strictly avoids reusing a file within the same merge unless pool is exhausted.
+        """
+        selected_for_this_merge = []
         estimated_total = 0.0
+        AVG_INTER_FILE_PAUSE_MIN = 0.08
         
-        # Create a working pool
-        available_pool = [f for f in files if f not in self.used_files]
-        if not available_pool:
-            self.used_files.clear()
-            available_pool = list(files)
+        # Local set to prevent duplicates in THIS single merged file
+        used_in_this_merge = set()
+        
+        while estimated_total < target_minutes * 0.9:
+            # 1. Try to pick from current pool (globally unused)
+            # Filter out files already used in THIS merge
+            candidates = [f for f in self.current_pool if f not in used_in_this_merge]
             
-        # Loop until we hit the target time or overshoot reasonably
-        # Allow a small margin of error (e.g. 10%)
-        while estimated_total < target_minutes * 0.9: 
-            if not available_pool:
-                # Refill pool if empty to allow reuse
-                available_pool = list(files)
-                self.rng.shuffle(available_pool)
+            if not candidates:
+                # If current pool is empty or all used in this merge, 
+                # Refill global pool with everything except what's used in this merge
+                # This respects the "use everything once before repeating" rule
+                self.global_used_files.clear() # Reset global tracking logic effectively
+                self.current_pool = list(self.all_files)
+                self.rng.shuffle(self.current_pool)
+                candidates = [f for f in self.current_pool if f not in used_in_this_merge]
+                
+                # If still no candidates (e.g. pool size < required files for time), allow duplicates
+                if not candidates:
+                    candidates = list(self.all_files) # Force pick from anywhere
             
-            # Try to find a file that fits the remaining gap without overshooting too much
+            # Smart selection logic: pick best fit for time if close
             remaining_gap = target_minutes - estimated_total
             best_fit = None
             
-            # Filter pool for files that don't drastically overshoot if we are close
-            # If we are far away (> 15 mins), just pick random
             if remaining_gap < 15:
-                candidates = [f for f in available_pool if file_durations.get(f, 2.0) <= remaining_gap + 5]
-                if candidates:
-                    best_fit = self.rng.choice(candidates)
-                elif available_pool:
-                    # If all candidates overshoot, pick the smallest one available
-                    best_fit = min(available_pool, key=lambda f: file_durations.get(f, 2.0))
+                # Try to find a file that fits the gap
+                fitting_candidates = [f for f in candidates if self.file_durations.get(f, 2.0) <= remaining_gap + 5]
+                if fitting_candidates:
+                    best_fit = self.rng.choice(fitting_candidates)
+                elif candidates:
+                    # If all too big, pick smallest
+                    best_fit = min(candidates, key=lambda f: self.file_durations.get(f, 2.0))
             
-            if not best_fit and available_pool:
-                best_fit = self.rng.choice(available_pool)
+            if not best_fit and candidates:
+                best_fit = self.rng.choice(candidates)
                 
             if best_fit:
-                dur = file_durations.get(best_fit, 2.0)
-                selected.append(best_fit)
+                selected_for_this_merge.append(best_fit)
+                dur = self.file_durations.get(best_fit, 2.0)
                 estimated_total += dur + AVG_INTER_FILE_PAUSE_MIN
                 
-                # Mark as used (locally)
-                if best_fit in available_pool:
-                    available_pool.remove(best_fit)
-                self.used_files.add(best_fit)
+                used_in_this_merge.add(best_fit)
+                self.global_used_files.add(best_fit)
+                
+                # Remove from current available pool if present
+                if best_fit in self.current_pool:
+                    self.current_pool.remove(best_fit)
             else:
-                break # Should not happen if pool refills
-            
-        print(f"  Selected {len(selected)} files, estimated total: {estimated_total:.1f}m (target: {target_minutes}m)")
-        return selected
-    
-    def shuffle_with_memory(self, items):
-        if not items or len(items) <= 1:
-            return items
-        shuffled = items.copy()
-        self.rng.shuffle(shuffled)
-        return shuffled
+                break # Should rarely happen
+                
+        return selected_for_this_merge
 
-def generate_version_for_folder(files, rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, selector, exemption_config: dict = None, target_minutes=25, max_files_per_version=4):
+def generate_version_for_folder(rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, global_selector, exemption_config: dict = None, target_minutes=25):
     """Generate merged version with 40% AFK cap, Target Time enforcement, and detailed manifest."""
-    if not files:
-        return None, [], [], {"inter_file_pauses": [], "intra_file_pauses": []}, [], 0, ""
-        
-    always_first = next((f for f in files if Path(f).name.lower().startswith(("always first", "-always first"))), None)
-    always_last = next((f for f in files if Path(f).name.lower().startswith(("always last", "-always last"))), None)
-    regular_files = [f for f in files if f not in [always_first, always_last]]
     
-    if not regular_files:
-        return None, [], [], {}, [], 0, ""
-    
-    # --- SMART EXCLUSION LOGIC ---
-    # If total available files are few (<= 5), adjust exclusion to ensure 
-    # we don't deplete the pool too much (leave at least 3 files or exclude 0 if very few).
-    n_total = len(regular_files)
-    if n_total <= 3:
-        pool_for_version = regular_files
-    else:
-        # Allow exclusion, but ensure we keep at least 2-3 files in the pool
-        safe_limit = max(0, n_total - 3)
-        actual_exclude = min(exclude_count, safe_limit)
-        if actual_exclude > 0:
-            excluded_subset = rng.sample(regular_files, actual_exclude)
-            pool_for_version = [f for f in regular_files if f not in excluded_subset]
-        else:
-            pool_for_version = regular_files
-
-    # --- 1. Select files to meet target duration ---
-    selected_files = selector.select_unique_files_for_time(pool_for_version, target_minutes)
+    # Use the global selector to get files
+    selected_files = global_selector.get_files_for_time(target_minutes)
     
     if not selected_files:
-        # Fallback if selection failed
         return None, [], [], {}, [], 0, ""
         
-    final_files = selector.shuffle_with_memory(selected_files)
+    # Get always first/last files separately (they are not managed by selector's pool logic typically, or passed in)
+    all_files_in_folder = find_json_files_in_dir(folder_path)
+    # Strictly exclude "always first" / "always last" from general logic
+    always_first = next((f for f in all_files_in_folder if Path(f).name.lower().startswith(("always first", "-always first"))), None)
+    always_last = next((f for f in all_files_in_folder if Path(f).name.lower().startswith(("always last", "-always last"))), None)
     
-    # Re-insert always first/last if they exist
-    if always_first: final_files.insert(0, always_first)
-    if always_last: final_files.append(always_last)
-
-    # Insert special file for mobile
+    final_files = list(selected_files)
+    
+    # Shuffle the selected core files
+    rng.shuffle(final_files)
+    
+    # Insert special file for mobile if needed
     special_path = locate_special_file(folder_path, input_root)
     is_mobile_group = any("mobile" in part.lower() for part in folder_path.parts)
     if is_mobile_group and special_path is not None:
+        # Remove existing instances to avoid duplicates
         final_files = [f for f in final_files if Path(f).resolve() != special_path.resolve()]
         mid_idx = len(final_files) // 2
         final_files.insert(mid_idx, str(special_path))
+
+    # Add always first/last
+    if always_first: final_files.insert(0, str(always_first))
+    if always_last: final_files.append(str(always_last))
 
     target_zones, excluded_zones = load_click_zones(folder_path)
     merged, pause_info, time_cursor = [], {"inter_file_pauses": [], "intra_file_pauses": []}, 0
@@ -617,11 +600,9 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     exemption_config = exemption_config or {"auto_detect_time_sensitive": True, "disable_intra_pauses": False, "disable_inter_pauses": False}
     is_time_sensitive = is_time_sensitive_folder(folder_path)
     
-    # Track accumulators for 40% AFK Logic
     total_events_duration_so_far = 0
     total_afk_duration_so_far = 0
     
-    # Store detailed file stats for manifest
     file_stats_list = []
 
     for idx, fpath in enumerate(final_files):
@@ -632,22 +613,17 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         raw_evs = load_json_events(fpath_obj)
         zb_evs, file_duration_ms = process_macro_file(raw_evs)
         
-        # Update event duration accumulator
         total_events_duration_so_far += file_duration_ms
-        
-        # Track specific AFK added for THIS file
         file_added_afk = 0
 
         if not is_special:
             is_desktop = "deskt" in str(folder_path).lower()
             zb_evs = preserve_click_integrity(zb_evs)
             
-            # --- Anti-Detection ---
             if not is_desktop:
                 zb_evs = add_mouse_jitter(zb_evs, rng, is_desktop=False, target_zones=target_zones, excluded_zones=excluded_zones)
                 zb_evs = add_reaction_variance(zb_evs, rng)
                 if not is_time_sensitive:
-                    # Calculate budget
                     budget = calculate_afk_budget(total_events_duration_so_far, total_afk_duration_so_far)
                     zb_evs, added_afk = add_time_of_day_fatigue(zb_evs, rng, is_time_sensitive=False, max_pause_ms=budget)
                     total_afk_duration_so_far += added_afk
@@ -662,9 +638,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
                     total_afk_duration_so_far += added_afk
                     file_added_afk += added_afk
             
-            zb_evs, _ = process_macro_file(zb_evs) # Re-normalize
+            zb_evs, _ = process_macro_file(zb_evs)
             
-            # --- Intra-Pauses & AFK ---
             if is_time_sensitive:
                 intra_evs = zb_evs
                 if not exemption_config.get("disable_intra_pauses", False):
@@ -676,7 +651,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             else:
                 intra_evs = zb_evs
             
-            # AFK Pause (Random 50% chance)
             if rng.random() < 0.5:
                 budget = calculate_afk_budget(total_events_duration_so_far, total_afk_duration_so_far)
                 intra_evs, added_afk = add_afk_pause(intra_evs, rng, budget)
@@ -685,10 +659,8 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
         else:
             intra_evs = zb_evs
             
-        # Merge
         per_file_event_ms[str(fpath_obj)] = intra_evs[-1]["Time"] if intra_evs else 0
         
-        # --- Inter-File Pause with Budget ---
         pause_ms = 0
         if idx > 0:
             budget = calculate_afk_budget(total_events_duration_so_far, total_afk_duration_so_far)
@@ -697,7 +669,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             elif is_time_sensitive:
                 raw_pause = rng.randint(0, int(between_max_s * 1000))
             else:
-                # Original inter-file pause: 1000-12000
                 raw_pause = rng.randint(1000, 12000)
             
             pause_ms = min(raw_pause, budget)
@@ -713,7 +684,6 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
             per_file_inter_ms[str(fpath_obj)] = 1000
             time_cursor += 1000
             
-        # Calculate final individual play time for manifest
         final_file_duration = file_duration_ms + file_added_afk + pause_ms
         final_file_mins = round(final_file_duration / 60000.0)
         file_stats_list.append(f"{part_from_filename(fpath_obj)} (~ {final_file_mins} mins)")
@@ -721,22 +691,17 @@ def generate_version_for_folder(files, rng, version_num, exclude_count, within_m
     total_ms = time_cursor if merged else 0
     total_minutes = compute_minutes_from_ms(total_ms)
     
-    # Construct filename
     parts = []
-    # Create a cleaner filename (no full path details)
     letters = number_to_letters(version_num or 1)
     base_name = f"{letters}_{total_minutes}m_{len(final_files)}files"
     
-    # --- CREATE DETAILED MANIFEST FILE CONTENT ---
-    # This will be written as a separate .txt file in the output folder
     manifest_content = f"Merged Version: {base_name}\nTotal Duration: {total_minutes} mins\nFile Count: {len(final_files)}\nTarget Time: {target_minutes} mins\n\nFiles Used:\n"
     for i, stat in enumerate(file_stats_list):
         manifest_content += f"{i+1}. {stat}\n"
     
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
-    excluded = [f for f in regular_files if f not in selected_files]
+    excluded = [] # Not relevant with global selector logic
     
-    # Return manifest content as an extra item in the tuple
     return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes, manifest_content
 
 def main():
@@ -776,6 +741,7 @@ def main():
         
     all_written_paths = []
     exemption_config = load_exemption_config()
+    
     for folder in folder_dirs:
         files = find_json_files_in_dir(folder)
         if not files: continue
@@ -785,30 +751,32 @@ def main():
             rel_folder = Path(folder.name)
         out_folder_for_group = output_root / rel_folder
         out_folder_for_group.mkdir(parents=True, exist_ok=True)
-        selector = NonRepeatingSelector(rng)
         
         print(f"\nProcessing folder: {rel_folder}")
         always_copied = copy_always_files_unmodified(files, out_folder_for_group)
         all_written_paths.extend(always_copied)
         
+        # Prepare valid pool for global selector (Exclude always first/last)
+        # Fix: Filter strictly before passing to selector
+        regular_files = [f for f in files if not Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
+        
+        # Initialize Global Selector ONCE per folder group to track usage across versions
+        global_selector = GlobalFileSelector(rng, regular_files)
+        
         for v in range(1, max(1, args.versions) + 1):
-            # Unpack the new manifest_content return value
             merged_fname, merged_events, finals, pauses, excluded, total_minutes, manifest_content = generate_version_for_folder(
                 files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, 
-                between_max_s, folder, input_root, selector, exemption_config, 
+                between_max_s, folder, input_root, global_selector, exemption_config, 
                 target_minutes=args.target_minutes, max_files_per_version=args.max_files
             )
             if not merged_fname: continue
             
-            # Write the JSON merged file
             out_path = out_folder_for_group / merged_fname
             try:
                 out_path.write_text(json.dumps(merged_events, indent=2, ensure_ascii=False), encoding="utf-8")
                 print(f"  ✓ Version {v}: {merged_fname} ({total_minutes}m)")
                 all_written_paths.append(out_path)
                 
-                # --- WRITE MANIFEST FILE ---
-                # Create a .txt file with the same base name as the json
                 manifest_path = out_folder_for_group / f"{Path(merged_fname).stem}_manifest.txt"
                 manifest_path.write_text(manifest_content, encoding="utf-8")
                 all_written_paths.append(manifest_path)
