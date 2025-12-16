@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness (Strict Exclusion & Global Pool)"""
+"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness (Strict Exclusion & Global Pool - Fixed Args)"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -561,6 +561,7 @@ class GlobalFileSelector:
                 
         return selected_for_this_merge
 
+# FIXED: Removed 'selector' from arguments as global_selector is used
 def generate_version_for_folder(rng, version_num, exclude_count, within_max_s, within_max_pauses, between_max_s, folder_path: Path, input_root: Path, global_selector, exemption_config: dict = None, target_minutes=25):
     """Generate merged version with 40% AFK cap, Target Time enforcement, and detailed manifest."""
     
@@ -700,7 +701,7 @@ def generate_version_for_folder(rng, version_num, exclude_count, within_max_s, w
         manifest_content += f"{i+1}. {stat}\n"
     
     safe_name = ''.join(ch for ch in base_name if ch not in '/\\:*?"<>|')
-    excluded = [] # Not relevant with global selector logic
+    excluded = [] 
     
     return f"{safe_name}.json", merged, [str(p) for p in final_files], pause_info, [str(p) for p in excluded], total_minutes, manifest_content
 
@@ -757,17 +758,17 @@ def main():
         all_written_paths.extend(always_copied)
         
         # Prepare valid pool for global selector (Exclude always first/last)
-        # Fix: Filter strictly before passing to selector
         regular_files = [f for f in files if not Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
         
         # Initialize Global Selector ONCE per folder group to track usage across versions
         global_selector = GlobalFileSelector(rng, regular_files)
         
         for v in range(1, max(1, args.versions) + 1):
+            # FIXED CALL: Removed 'selector' argument, passed 'global_selector' correctly
             merged_fname, merged_events, finals, pauses, excluded, total_minutes, manifest_content = generate_version_for_folder(
-                files, rng, v, args.exclude_count, within_max_s, args.within_max_pauses, 
+                rng, v, args.exclude_count, within_max_s, args.within_max_pauses, 
                 between_max_s, folder, input_root, global_selector, exemption_config, 
-                target_minutes=args.target_minutes, max_files_per_version=args.max_files
+                target_minutes=args.target_minutes
             )
             if not merged_fname: continue
             
