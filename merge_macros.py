@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Fixed NameError and Implemented Round-Robin Queue Logic"""
+"""merge_macros.py - Fixed NameError, Restored Folder Tree, and Added Manifests"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -28,6 +28,7 @@ def is_time_sensitive_folder(folder_path: Path) -> bool:
 def find_all_dirs_with_json(input_root: Path):
     found = []
     if not input_root.exists(): return found
+    # Find directories that contain at least one JSON file
     for p in sorted(input_root.rglob("*")):
         if p.is_dir():
             if any(child.suffix.lower() == ".json" for child in p.iterdir() if child.is_file()):
@@ -35,6 +36,7 @@ def find_all_dirs_with_json(input_root: Path):
     return found
 
 def find_json_files_in_dir(dirpath: Path):
+    # Exclude helper files or click zone configurations
     return sorted([p for p in dirpath.glob("*.json") if p.is_file() and "click_zones" not in p.name])
 
 def load_json_events(path: Path):
@@ -65,7 +67,6 @@ def preserve_click_integrity(events):
     preserved = []
     for e in events:
         ne = deepcopy(e)
-        # Mark clicks/drags as protected from jitter/reaction variance to prevent breaking logic
         if any(t in str(e.get('Type', '')) for t in ['Down', 'Up', 'Click', 'Button', 'Drag']):
             ne['PROTECTED'] = True
         preserved.append(ne)
@@ -118,7 +119,6 @@ def add_reaction_variance(events, rng):
 # ==============================================================================
 
 class QueueFileSelector:
-    """Manages files in a queue; used files move to the back of the line."""
     def __init__(self, rng, all_files):
         self.rng = rng
         self.all_files = [str(f.resolve()) for f in all_files]
@@ -128,27 +128,23 @@ class QueueFileSelector:
     def get_files_for_time(self, target_minutes):
         selected = []
         current_mins = 0.0
-        # Average macro length for selection logic
         while current_mins < target_minutes:
             if not self.pool:
-                # Refill the pool if all files have been used once
                 self.pool = list(self.all_files)
                 self.rng.shuffle(self.pool)
             
-            # Pick the next file that isn't already in this specific merge version
             pick = None
             for f in self.pool:
                 if f not in selected:
                     pick = f
                     break
             
-            # If the pool is smaller than the target duration, we must repeat
             if not pick: pick = self.pool[0]
             
             selected.append(pick)
             if pick in self.pool: self.pool.remove(pick)
-            current_mins += 2.3 # Estimated min/file
-            if len(selected) > 60: break # Safety break
+            current_mins += 2.5 
+            if len(selected) > 60: break
         return selected
 
 # ==============================================================================
@@ -157,9 +153,8 @@ class QueueFileSelector:
 
 def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_pause_max):
     selected_paths = selector.get_files_for_time(target_min)
-    if not selected_paths: return None, None
+    if not selected_paths: return None, None, None
     
-    # Sort: "Always First" macros at start, "Always Last" at end
     selected_paths.sort(key=lambda x: (
         0 if "always first" in Path(x).name.lower() else 
         2 if "always last" in Path(x).name.lower() else 1
@@ -167,36 +162,31 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_
 
     all_evs = []
     parts_info = []
+    manifest_lines = []
     is_time_sensitive = is_time_sensitive_folder(folder)
     
     for i, path_str in enumerate(selected_paths):
         p = Path(path_str)
-        
-        # --- FIX: is_special DEFINED HERE TO PREVENT NameError ---
         is_special = SPECIAL_KEYWORD in p.name.lower() or p.name.lower() == SPECIAL_FILENAME
         
         raw_evs, _ = process_macro_file(load_json_events(p))
         if not raw_evs: continue
         
         evs = preserve_click_integrity(raw_evs)
-        
-        # Apply anti-detection only to non-special macros
         if not is_special:
             evs = add_mouse_jitter(evs, rng)
             evs = add_reaction_variance(evs, rng)
         
-        # Handle Inter-file pauses
         pause = 0
         if i > 0:
-            if is_time_sensitive:
-                pause = rng.randint(100, 800) # Short pauses for time-sensitive
-            else:
-                pause = rng.randint(500, inter_pause_max * 1000)
+            pause = rng.randint(100, 800) if is_time_sensitive else rng.randint(500, inter_pause_max * 1000)
                 
         all_evs = merge_events_with_pauses(all_evs, evs, pause)
-        parts_info.append(f"{number_to_letters(i+1)}[{p.stem}]")
+        letter = number_to_letters(i+1)
+        parts_info.append(f"{letter}[{p.stem}]")
+        manifest_lines.append(f"  {letter}: {p.name}")
     
-    if not all_evs: return None, None
+    if not all_evs: return None, None, None
     
     final_min = int(all_evs[-1]['Time'] / 60000)
     v_code = number_to_letters(v_num)
@@ -204,7 +194,9 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_
     clean_folder = folder.name.replace(" ", "").replace("-", "")
     fname = f"{clean_folder}_{v_code}_{final_min}m={parts_str}.json"
     
-    return fname, all_evs
+    manifest_entry = f"FILENAME: {fname}\nDURATION: {final_min} minutes\nCOMPONENTS:\n" + "\n".join(manifest_lines) + "\n" + "-"*30
+    
+    return fname, all_evs, manifest_entry
 
 def main():
     parser = argparse.ArgumentParser()
@@ -213,7 +205,6 @@ def main():
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--between-max-time", type=int, default=18)
     parser.add_argument("--target-minutes", type=int, default=25)
-    # Include legacy flag to prevent crashes if workflow isn't fully updated
     parser.add_argument("--exclude-count", type=int, default=0) 
     args = parser.parse_args()
 
@@ -225,28 +216,35 @@ def main():
     print(f"Starting merge for bundle {bundle_n}...")
     
     folders = find_all_dirs_with_json(args.input_root)
-    print(f"Found {len(folders)} macro groups.")
+    print(f"Found {len(folders)} groups with JSON files.")
 
     for folder in folders:
         files = find_json_files_in_dir(folder)
         if not files: continue
         
-        print(f"Processing group: {folder.name}")
-        out_folder = bundle_dir / folder.name
+        # PRESERVE FOLDER TREE: Calculate relative path from input root
+        rel_path = folder.relative_to(args.input_root)
+        out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        # Initialize the Queue Selector for this specific folder
+        print(f"Processing group: {rel_path}")
+        
         selector = QueueFileSelector(rng, files)
+        folder_manifest = [f"MANIFEST FOR FOLDER: {rel_path}\n{'='*40}\n"]
         
         for v in range(1, args.versions + 1):
-            fname, evs = generate_version_for_folder(
+            fname, evs, m_entry = generate_version_for_folder(
                 rng, v, folder, selector, 
                 args.target_minutes, args.between_max_time
             )
             if fname and evs:
                 (out_folder / fname).write_text(json.dumps(evs, indent=2), encoding="utf-8")
+                folder_manifest.append(m_entry)
+        
+        # Write the time manifest for this folder
+        if len(folder_manifest) > 1:
+            (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest), encoding="utf-8")
                 
-    # Increment counter for next run
     write_counter(COUNTER_PATH, bundle_n + 1)
 
 if __name__ == "__main__":
