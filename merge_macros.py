@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Precise duration matching, Round-Robin Queue Logic, and Detailed Manifests with Exact Time Formatting"""
+"""merge_macros.py - Advanced Pause Logic (Probabilistic Intra-file & Fixed Inter-file)"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -21,9 +21,6 @@ def read_counter(path: Path) -> int:
 def write_counter(path: Path, n: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(str(n), encoding="utf-8")
-
-def is_time_sensitive_folder(folder_path: Path) -> bool:
-    return "time sensitive" in str(folder_path).lower()
 
 def find_all_dirs_with_json(input_root: Path):
     found = []
@@ -48,7 +45,6 @@ def load_json_events(path: Path):
     except: return []
 
 def get_file_duration_ms(path: Path) -> int:
-    """Helper to quickly get the duration of a macro file."""
     events = load_json_events(path)
     if not events: return 0
     try:
@@ -57,7 +53,6 @@ def get_file_duration_ms(path: Path) -> int:
     except: return 0
 
 def format_ms_precise(ms: int) -> str:
-    """Formats milliseconds into X.Min Y.Sec string."""
     total_seconds = int(ms / 1000)
     minutes = total_seconds // 60
     seconds = total_seconds % 60
@@ -86,14 +81,6 @@ def preserve_click_integrity(events):
         preserved.append(ne)
     return preserved
 
-def merge_events_with_pauses(base: list[dict], new: list[dict], pause_ms: int) -> list[dict]:
-    if not new: return base
-    last_t = base[-1]['Time'] if base else 0
-    shift = last_t + pause_ms
-    shifted = deepcopy(new)
-    for e in shifted: e['Time'] = int(e.get('Time', 0)) + shift
-    return base + shifted
-
 def number_to_letters(n: int) -> str:
     res = ""
     while n > 0:
@@ -102,8 +89,55 @@ def number_to_letters(n: int) -> str:
     return res or "A"
 
 # ==============================================================================
-# ANTI-DETECTION
+# PAUSE & ANTI-DETECTION LOGIC
 # ==============================================================================
+
+def apply_intra_file_pauses(events, rng):
+    """
+    Implements internal pauses based on probability weights:
+    0% (40% chance), 4% (15%), 9% (15%), 16% (15%), 25% (10%), 31% (5%)
+    """
+    if not events: return events
+    
+    # Probability roll
+    choices = [0, 4, 9, 16, 25, 31]
+    weights = [40, 15, 15, 15, 10, 5]
+    pct = rng.choices(choices, weights=weights, k=1)[0]
+    
+    if pct == 0:
+        return events
+
+    original_duration = events[-1]['Time'] - events[0]['Time']
+    total_pause_needed = int(original_duration * (pct / 100))
+    
+    if total_pause_needed <= 0:
+        return events
+
+    # Divide total pause into 3-6 random chunks
+    num_chunks = rng.randint(3, 6)
+    chunk_sizes = []
+    remaining = total_pause_needed
+    for i in range(num_chunks - 1):
+        c = rng.randint(1, remaining // 2) if remaining > 2 else 1
+        chunk_sizes.append(c)
+        remaining -= c
+    chunk_sizes.append(remaining)
+
+    # Intersperse chunks into the event list (avoiding Protected click sequences)
+    modified_events = deepcopy(events)
+    for pause_amt in chunk_sizes:
+        # Pick a random injection point (not at the very start/end)
+        idx = rng.randint(1, len(modified_events) - 2)
+        
+        # Ensure we aren't splitting a Click-Down/Up pair
+        # Add the pause_amt + a random MS jitter to ensure it's NEVER a whole number
+        jitter = rng.randint(1, 49) # ensures result ends in .1 to .49 ms essentially
+        actual_pause = pause_amt + jitter
+        
+        for i in range(idx, len(modified_events)):
+            modified_events[i]['Time'] += actual_pause
+            
+    return modified_events
 
 def add_mouse_jitter(events, rng):
     jittered = []
@@ -123,10 +157,19 @@ def add_reaction_variance(events, rng):
     for e in events:
         ne = deepcopy(e)
         if not e.get('PROTECTED') and rng.random() < 0.15:
-            offset += rng.randint(-30, 30)
-        ne['Time'] = max(0, int(e.get('Time', 0)) + offset)
+            # Add random MS offset, ensuring it's not a round number
+            offset += rng.randint(-30, 30) + (rng.random() * 2 - 1)
+        ne['Time'] = max(0, int(e.get('Time', 0)) + int(offset))
         varied.append(ne)
     return varied
+
+def merge_events_with_pauses(base: list[dict], new: list[dict], pause_ms: int) -> list[dict]:
+    if not new: return base
+    last_t = base[-1]['Time'] if base else 0
+    shift = last_t + pause_ms
+    shifted = deepcopy(new)
+    for e in shifted: e['Time'] = int(e.get('Time', 0)) + shift
+    return base + shifted
 
 # ==============================================================================
 # ROUND-ROBIN SELECTOR
@@ -139,7 +182,7 @@ class QueueFileSelector:
         self.pool = list(self.all_files)
         self.rng.shuffle(self.pool)
         
-    def get_files_for_time(self, target_minutes, inter_pause_avg_ms):
+    def get_files_for_time(self, target_minutes):
         selected = []
         current_ms = 0.0
         target_ms = target_minutes * 60000
@@ -165,7 +208,8 @@ class QueueFileSelector:
             selected.append(pick)
             if pick in self.pool: self.pool.remove(pick)
             
-            current_ms += dur + inter_pause_avg_ms
+            # Use 15% as a conservative average internal pause + 300ms inter-file pause for target calculation
+            current_ms += (dur * 1.15) + 300
             if len(selected) > 100: break 
             
         return selected
@@ -174,11 +218,8 @@ class QueueFileSelector:
 # MAIN LOGIC
 # ==============================================================================
 
-def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_pause_max):
-    is_time_sensitive = is_time_sensitive_folder(folder)
-    avg_pause_ms = 450 if is_time_sensitive else (inter_pause_max * 1000) / 2
-    
-    selected_paths = selector.get_files_for_time(target_min, avg_pause_ms)
+def generate_version_for_folder(rng, v_num, folder, selector, target_min):
+    selected_paths = selector.get_files_for_time(target_min)
     if not selected_paths: return None, None, None
     
     selected_paths.sort(key=lambda x: (
@@ -194,25 +235,33 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_
         p = Path(path_str)
         is_special = SPECIAL_KEYWORD in p.name.lower() or p.name.lower() == SPECIAL_FILENAME
         
-        file_dur_ms = get_file_duration_ms(p)
         raw_evs, _ = process_macro_file(load_json_events(p))
         if not raw_evs: continue
         
+        # 1. Preserve Clicks
         evs = preserve_click_integrity(raw_evs)
+        
+        # 2. Apply Intra-file Internal Pauses (New Probability Rule)
         if not is_special:
+            evs = apply_intra_file_pauses(evs, rng)
             evs = add_mouse_jitter(evs, rng)
             evs = add_reaction_variance(evs, rng)
         
-        pause = 0
+        # 3. Inter-file Pause (Rule: 100ms - 500ms, non-whole jitter)
+        inter_pause = 0
         if i > 0:
-            pause = rng.randint(100, 800) if is_time_sensitive else rng.randint(500, inter_pause_max * 1000)
-            total_pause_ms += pause
+            inter_pause = rng.randint(100, 500)
+            # Add micro-jitter to ensure it's not a round number
+            inter_pause += rng.randint(1, 9) 
+            total_pause_ms += inter_pause
                 
-        all_evs = merge_events_with_pauses(all_evs, evs, pause)
-        letter = number_to_letters(i+1)
+        # 4. Merge
+        all_evs = merge_events_with_pauses(all_evs, evs, inter_pause)
         
-        dur_str = format_ms_precise(file_dur_ms)
-        manifest_lines.append(f"  {letter}: {p.name} ({dur_str})")
+        letter = number_to_letters(i+1)
+        # Calculate resulting duration of this specific processed segment
+        seg_dur = evs[-1]['Time'] - evs[0]['Time']
+        manifest_lines.append(f"  {letter}: {p.name} ({format_ms_precise(seg_dur)})")
     
     if not all_evs: return None, None, None
     
@@ -227,8 +276,8 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_
     manifest_entry = (
         f"FILENAME: {fname}\n"
         f"TOTAL DURATION: {total_dur_str}\n"
-        f"TOTAL AFK TIME: {afk_dur_str}\n"
-        f"COMPONENTS:\n" + "\n".join(manifest_lines) + "\n" + "-"*30
+        f"TOTAL INTER-FILE AFK: {afk_dur_str}\n"
+        f"COMPONENTS (Includes Internal Random Pauses):\n" + "\n".join(manifest_lines) + "\n" + "-"*30
     )
     
     return fname, all_evs, manifest_entry
@@ -238,8 +287,9 @@ def main():
     parser.add_argument("input_root", type=Path)
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
-    parser.add_argument("--between-max-time", type=int, default=18)
     parser.add_argument("--target-minutes", type=int, default=25)
+    # legacy args ignored but kept for CLI compatibility
+    parser.add_argument("--between-max-time", type=int, default=0)
     parser.add_argument("--exclude-count", type=int, default=0) 
     args = parser.parse_args()
 
@@ -251,8 +301,6 @@ def main():
     print(f"Starting merge for bundle {bundle_n}...")
     
     folders = find_all_dirs_with_json(args.input_root)
-    print(f"Found {len(folders)} groups with JSON files.")
-
     for folder in folders:
         files = find_json_files_in_dir(folder)
         if not files: continue
@@ -261,15 +309,12 @@ def main():
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        print(f"Processing group: {rel_path}")
-        
         selector = QueueFileSelector(rng, files)
         folder_manifest = [f"MANIFEST FOR FOLDER: {rel_path}\n{'='*40}\n"]
         
         for v in range(1, args.versions + 1):
             fname, evs, m_entry = generate_version_for_folder(
-                rng, v, folder, selector, 
-                args.target_minutes, args.between_max_time
+                rng, v, folder, selector, args.target_minutes
             )
             if fname and evs:
                 (out_folder / fname).write_text(json.dumps(evs, indent=2), encoding="utf-8")
