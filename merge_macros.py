@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness (Fixed Arguments)"""
+"""merge_macros.py - OSRS Anti-Detection with AFK & Zone Awareness (Fixed Exclusion & Args)"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -256,7 +256,7 @@ def copy_always_files_unmodified(files, out_folder_for_group: Path):
     return copied_paths
 
 # ==============================================================================
-# ANTI-DETECTION & LOGIC (RESTORED PAUSES + 40% CAP)
+# ANTI-DETECTION & LOGIC
 # ==============================================================================
 
 def calculate_afk_budget(total_event_time_ms, current_afk_time_ms):
