@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Precise duration matching, Round-Robin Queue Logic, and Detailed Manifests"""
+"""merge_macros.py - Precise duration matching, Round-Robin Queue Logic, and Detailed Manifests with Exact Time Formatting"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -56,12 +56,12 @@ def get_file_duration_ms(path: Path) -> int:
         return max(times) - min(times)
     except: return 0
 
-def format_ms(ms: int) -> str:
-    """Formats milliseconds into (Xmin Ysec) string."""
+def format_ms_precise(ms: int) -> str:
+    """Formats milliseconds into X.Min Y.Sec string."""
     total_seconds = int(ms / 1000)
     minutes = total_seconds // 60
     seconds = total_seconds % 60
-    return f"({minutes}min {seconds}sec)"
+    return f"{minutes}.Min {seconds}.Sec"
 
 def process_macro_file(events: list[dict]) -> tuple[list[dict], int]:
     if not events: return [], 0
@@ -149,19 +149,15 @@ class QueueFileSelector:
                 self.pool = list(self.all_files)
                 self.rng.shuffle(self.pool)
             
-            # Find next in queue not in current selection
             pick = None
             for f in self.pool:
                 if f not in selected:
                     pick = f
                     break
             
-            # If every file is already in 'selected' but we haven't hit target time,
-            # we must repeat files (moving through the queue again).
             if not pick: pick = self.pool[0]
             
             dur = get_file_duration_ms(Path(pick))
-            # If a file is broken/empty, skip to avoid infinite loop
             if dur <= 0 and len(self.all_files) > 1:
                 if pick in self.pool: self.pool.remove(pick)
                 continue
@@ -169,10 +165,7 @@ class QueueFileSelector:
             selected.append(pick)
             if pick in self.pool: self.pool.remove(pick)
             
-            # Accumulate duration + estimated pause
             current_ms += dur + inter_pause_avg_ms
-            
-            # Hard safety break (100 macros) to prevent crashes on extremely tiny files
             if len(selected) > 100: break 
             
         return selected
@@ -182,14 +175,12 @@ class QueueFileSelector:
 # ==============================================================================
 
 def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_pause_max):
-    # Estimate average pause for the selector's time math
     is_time_sensitive = is_time_sensitive_folder(folder)
     avg_pause_ms = 450 if is_time_sensitive else (inter_pause_max * 1000) / 2
     
     selected_paths = selector.get_files_for_time(target_min, avg_pause_ms)
     if not selected_paths: return None, None, None
     
-    # Sort: Always First -> Regular -> Always Last
     selected_paths.sort(key=lambda x: (
         0 if "always first" in Path(x).name.lower() else 
         2 if "always last" in Path(x).name.lower() else 1
@@ -220,22 +211,23 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, inter_
         all_evs = merge_events_with_pauses(all_evs, evs, pause)
         letter = number_to_letters(i+1)
         
-        # Format the individual duration for the manifest
-        dur_str = format_ms(file_dur_ms)
-        manifest_lines.append(f"  {letter}: {p.name} {dur_str}")
+        dur_str = format_ms_precise(file_dur_ms)
+        manifest_lines.append(f"  {letter}: {p.name} ({dur_str})")
     
     if not all_evs: return None, None, None
     
-    final_min = int(all_evs[-1]['Time'] / 60000)
-    afk_min = round(total_pause_ms / 60000, 2)
-    v_code = number_to_letters(v_num)
+    total_ms = all_evs[-1]['Time'] if all_evs else 0
+    total_dur_str = format_ms_precise(total_ms)
+    afk_dur_str = format_ms_precise(total_pause_ms)
     
-    fname = f"{v_code}_{final_min}m.json"
+    v_code = number_to_letters(v_num)
+    final_min_only = int(total_ms / 60000)
+    fname = f"{v_code}_{final_min_only}m.json"
     
     manifest_entry = (
         f"FILENAME: {fname}\n"
-        f"TOTAL DURATION: {final_min} minutes\n"
-        f"TOTAL AFK TIME: {afk_min} minutes\n"
+        f"TOTAL DURATION: {total_dur_str}\n"
+        f"TOTAL AFK TIME: {afk_dur_str}\n"
         f"COMPONENTS:\n" + "\n".join(manifest_lines) + "\n" + "-"*30
     )
     
