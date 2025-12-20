@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Robust File Discovery Version"""
+"""merge_macros.py - Robust File Discovery Version with Path Correction"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math
@@ -40,36 +40,44 @@ def main():
     parser.add_argument("--bundle-id", type=int, required=True)
     args, unknown = parser.parse_known_args()
 
+    # Path Correction: If "originals" doesn't exist at the root, check if we're already inside it
+    search_root = args.input_root
+    if not search_root.exists():
+        print(f"Warning: {search_root} not found. Checking fallback paths...")
+        if Path("originals").exists():
+            search_root = Path("originals")
+        else:
+            search_root = Path(".") # Search current directory as last resort
+
     rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"--- DEBUG: SEARCHING FOR MACROS ---")
-    print(f"Scanning root: {args.input_root.resolve()}")
+    print(f"Scanning root: {search_root.resolve()}")
 
-    # Deep scan: Find every directory that contains at least one .json file
     folders_with_json = []
-    for p in args.input_root.rglob("*"):
-        if p.is_dir():
-            # Filter out hidden folders or output folders if they exist inside input
-            if p.name.startswith('.') or "output" in p.parts:
-                continue
-            
-            jsons = [f for f in p.glob("*.json") if "click_zones" not in f.name.lower()]
-            if jsons:
-                folders_with_json.append((p, jsons))
-                print(f"Found folder with {len(jsons)} macros: {p.relative_to(args.input_root)}")
+    # Using rglob to find any folder containing a json file
+    for p in search_root.rglob("*.json"):
+        if "click_zones" in p.name.lower() or "output" in p.parts or p.name.startswith('.'):
+            continue
+        
+        folder = p.parent
+        if folder not in [f[0] for f in folders_with_json]:
+            # Get all jsons in this specific folder
+            jsons = [f for f in folder.glob("*.json") if "click_zones" not in f.name.lower()]
+            folders_with_json.append((folder, jsons))
+            print(f"Found group: {folder.relative_to(search_root)} ({len(jsons)} files)")
 
     if not folders_with_json:
-        print(f"CRITICAL ERROR: No JSON files found in {args.input_root} or any subfolders!")
-        sys.exit(1) # Force the GitHub Action to fail so you can see the error
+        print(f"CRITICAL ERROR: No JSON files found in {search_root}!")
+        sys.exit(1)
 
     for folder_path, json_files in folders_with_json:
-        rel_path = folder_path.relative_to(args.input_root)
+        # Create output subfolder
+        rel_path = folder_path.relative_to(search_root)
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
-        
-        print(f"Processing Group: {rel_path}")
         
         for v in range(1, args.versions + 1):
             selected = []
@@ -79,16 +87,14 @@ def main():
             pool = list(json_files)
             rng.shuffle(pool)
             
-            # Simple Round-Robin to fill time
             while current_ms < target_ms and pool:
                 pick = pool.pop(0)
                 selected.append(pick)
-                # Estimate: Duration + 20% + 1s inter-file gap
-                current_ms += (get_file_duration_ms(pick) * 1.2) + 1000
+                current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
                 if not pool and current_ms < target_ms:
                     pool = list(json_files)
                     rng.shuffle(pool)
-                if len(selected) > 100: break # Safety cap
+                if len(selected) > 150: break 
             
             if not selected: continue
             
@@ -105,34 +111,29 @@ def main():
                 base_t = min(t_vals) if t_vals else 0
                 dur = (max(t_vals) - base_t) if t_vals else 0
                 
-                # Humanization Gap
-                gap = rng.randint(500, 2000) if i > 0 else 0
+                gap = rng.randint(500, 2500) if i > 0 else 0
                 timeline_ms += gap
                 
-                # Roll for Human AFK Pool (Ignore for screenshare links)
                 if "screensharelink" not in p.name.lower():
-                    pct = rng.choice([0, 0, 0.12, 0.20, 0.28]) # High weight on 0 for stability
+                    pct = rng.choice([0, 0, 0, 0.12, 0.20])
                     accumulated_afk += int(dur * pct)
 
                 for e in raw:
                     ne = deepcopy(e)
                     ne["Time"] = (int(e.get("Time", 0)) - base_t) + timeline_ms
                     merged_events.append(ne)
-                
                 timeline_ms = merged_events[-1]["Time"]
 
-            # Apply Accumulated AFK
             if accumulated_afk > 0:
                 if is_time_sensitive:
                     merged_events[-1]["Time"] += accumulated_afk
                 else:
-                    split_idx = rng.randint(1, len(merged_events) - 1)
-                    for k in range(split_idx, len(merged_events)):
+                    split = rng.randint(1, len(merged_events) - 1)
+                    for k in range(split, len(merged_events)):
                         merged_events[k]["Time"] += accumulated_afk
 
-            final_dur = merged_events[-1]["Time"]
             v_code = number_to_letters(v)
-            fname = f"{v_code}_{int(final_dur / 60000)}m.json"
+            fname = f"{v_code}_{int(merged_events[-1]['Time'] / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
 
     print(f"--- SUCCESS: All folders processed ---")
