@@ -70,13 +70,14 @@ jobs:
           BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
           ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
           
-          echo "Checking directory structure before zipping..."
+          # Debugging: check if the folder actually exists
           ls -R output/
           
           if [ -d "output/$BUNDLE_NAME" ]; then
+            # Move into output so ZIP structure is clean
             cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
           else
-            echo "CRITICAL ERROR: Directory output/$BUNDLE_NAME was not created by the script!"
+            echo "Error: Directory output/$BUNDLE_NAME was not found!"
             exit 1
           fi
           echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
