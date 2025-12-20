@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Advanced Pause Logic with Jittered Delay-Before-Action (-18/+19ms)"""
+"""merge_macros.py - Unified Humanization Engine with Accumulated Single-Block AFK"""
 
 from pathlib import Path
 import argparse, json, random, re, sys, os, math, shutil
@@ -89,113 +89,46 @@ def number_to_letters(n: int) -> str:
     return res or "A"
 
 # ==============================================================================
-# PAUSE & ANTI-DETECTION LOGIC
+# UPDATED HUMANIZATION RULES
 # ==============================================================================
 
-def apply_delay_before_action(events, delay_ms, rng):
-    """
-    Calculates a pool (20-30% of duration) and inserts delay_ms chunks
-    randomly before actions. Applies -18ms to +19ms jitter to each chunk.
-    """
+def apply_micro_hesitation(events, delay_ms, rng):
+    """Rule 1: Delay Before Action (40% chance per file)"""
     if delay_ms <= 0 or not events: return events, 0
-    
-    original_duration = events[-1]['Time'] - events[0]['Time']
-    # Choose pool percentage between 20% and 30%
-    pool_pct = rng.uniform(20, 30)
-    total_delay_pool = int(original_duration * (pool_pct / 100))
-    
-    # Estimate insertions based on the base delay_ms
-    num_insertions = total_delay_pool // delay_ms
-    if num_insertions <= 0: return events, 0
+    if rng.random() > 0.40: return events, 0
     
     modified_events = deepcopy(events)
     total_added = 0
-    
-    for _ in range(num_insertions):
-        idx = rng.randint(1, len(modified_events) - 1)
-        # Apply the specific -18 to +19 jitter logic
-        jitter = rng.randint(-18, 19)
+    for i in range(len(modified_events)):
+        # Jitter range: -118ms to +119ms
+        jitter = rng.randint(-118, 119)
         actual_chunk = delay_ms + jitter
-        
-        # Ensure we don't accidentally create a negative time shift (safety check)
         if actual_chunk < 0: actual_chunk = 0
-        
-        for i in range(idx, len(modified_events)):
-            modified_events[i]['Time'] += actual_chunk
+        for j in range(i, len(modified_events)):
+            modified_events[j]['Time'] += actual_chunk
         total_added += actual_chunk
-            
     return modified_events, total_added
 
-def apply_intra_file_pauses(events, rng):
-    if not events: return events, 0
-    
-    choices = [0, 8, 15, 21, 25.5, 29]
-    weights = [40, 20, 15, 10, 10, 5]
+def roll_macro_afk_pool(events, rng):
+    """Rule 2 Part A: Roll odds per file to add to a global pool"""
+    if not events: return 0
+    choices = [0, 12, 20, 28]
+    weights = [55, 20, 15, 10]
     pct = rng.choices(choices, weights=weights, k=1)[0]
+    if pct == 0: return 0
     
-    if pct == 0:
-        return events, 0
+    duration = events[-1]['Time'] - events[0]['Time']
+    return int(duration * (pct / 100))
 
-    original_duration = events[-1]['Time'] - events[0]['Time']
-    total_pause_needed = int(original_duration * (pct / 100))
+def inject_single_afk_block(events, total_pool_ms, rng):
+    """Rule 2 Part B: Insert total pool as one massive chunk randomly in merged sequence"""
+    if total_pool_ms <= 0 or not events: return events
     
-    if total_pause_needed <= 0:
-        return events, 0
-
-    num_chunks = rng.randint(3, 6)
-    chunk_sizes = []
-    remaining = total_pause_needed
-    for i in range(num_chunks - 1):
-        c = rng.randint(1, remaining // 2) if remaining > 2 else 1
-        chunk_sizes.append(c)
-        remaining -= c
-    chunk_sizes.append(remaining)
-
     modified_events = deepcopy(events)
-    actual_added_ms = 0
-    
-    for pause_amt in chunk_sizes:
-        idx = rng.randint(1, len(modified_events) - 2)
-        # Standard jitter for probability pauses
-        jitter = rng.randint(1, 49) 
-        actual_pause = pause_amt + jitter
-        actual_added_ms += actual_pause
-        
-        for i in range(idx, len(modified_events)):
-            modified_events[i]['Time'] += actual_pause
-            
-    return modified_events, actual_added_ms
-
-def add_mouse_jitter(events, rng):
-    jittered = []
-    for e in events:
-        ne = deepcopy(e)
-        if not e.get('PROTECTED') and 'X' in e and 'Y' in e:
-            try:
-                ne['X'] = int(e['X']) + rng.randint(-1, 1)
-                ne['Y'] = int(e['Y']) + rng.randint(-1, 1)
-            except: pass
-        jittered.append(ne)
-    return jittered
-
-def add_reaction_variance(events, rng):
-    varied = []
-    offset = 0
-    for e in events:
-        ne = deepcopy(e)
-        if not e.get('PROTECTED') and rng.random() < 0.15:
-            offset += rng.randint(-30, 30) + (rng.random() * 2 - 1)
-        ne['Time'] = max(0, int(e.get('Time', 0)) + int(offset))
-        varied.append(ne)
-    return varied
-
-def merge_events_with_pauses(base: list[dict], new: list[dict], pause_ms: int) -> list[dict]:
-    if not new: return base
-    last_t = base[-1]['Time'] if base else 0
-    shift = last_t + pause_ms
-    shifted = deepcopy(new)
-    for e in shifted: e['Time'] = int(e.get('Time', 0)) + shift
-    return base + shifted
+    idx = rng.randint(1, len(modified_events) - 1)
+    for i in range(idx, len(modified_events)):
+        modified_events[i]['Time'] += total_pool_ms
+    return modified_events
 
 # ==============================================================================
 # ROUND-ROBIN SELECTOR
@@ -212,32 +145,25 @@ class QueueFileSelector:
         selected = []
         current_ms = 0.0
         target_ms = target_minutes * 60000
-        
         while current_ms < target_ms:
             if not self.pool:
                 self.pool = list(self.all_files)
                 self.rng.shuffle(self.pool)
-            
             pick = None
             for f in self.pool:
                 if f not in selected:
                     pick = f
                     break
-            
             if not pick: pick = self.pool[0]
-            
             dur = get_file_duration_ms(Path(pick))
             if dur <= 0 and len(self.all_files) > 1:
                 if pick in self.pool: self.pool.remove(pick)
                 continue
-
             selected.append(pick)
             if pick in self.pool: self.pool.remove(pick)
-            
-            # Use 45% as safe upper bound for target calculation (Inc. new delays)
-            current_ms += (dur * 1.45) + 300
+            # Rough time estimation for filling the target (inc buffer for pauses)
+            current_ms += (dur * 1.5) + 1200
             if len(selected) > 100: break 
-            
         return selected
 
 # ==============================================================================
@@ -253,10 +179,11 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, delay_
         2 if "always last" in Path(x).name.lower() else 1
     ))
 
-    all_evs = []
+    merged_events = []
     manifest_lines = []
-    total_inter_pause_ms = 0
-    total_internal_pause_ms = 0
+    accumulated_afk_pool = 0
+    total_inter_file_gap_ms = 0
+    total_micro_delay_ms = 0
     
     for i, path_str in enumerate(selected_paths):
         p = Path(path_str)
@@ -266,39 +193,34 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, delay_
         if not raw_evs: continue
         
         evs = preserve_click_integrity(raw_evs)
-        added_internal_ms = 0
-        added_delay_ms = 0
         
         if not is_special:
-            evs, added_internal_ms = apply_intra_file_pauses(evs, rng)
-            # Use the new jittered delay logic
-            evs, added_delay_ms = apply_delay_before_action(evs, delay_before_ms, rng)
+            # Rule 1: Micro Hesitations (40% chance)
+            evs, micro_ms = apply_micro_hesitation(evs, delay_before_ms, rng)
+            total_micro_delay_ms += micro_ms
             
-            evs = add_mouse_jitter(evs, rng)
-            evs = add_reaction_variance(evs, rng)
+            # Rule 2: Roll for the Pool (Macro AFK)
+            added_to_pool = roll_macro_afk_pool(evs, rng)
+            accumulated_afk_pool += added_to_pool
         
-        total_internal_pause_ms += (added_internal_ms + added_delay_ms)
-        
+        # Rule 3: Inter-File Gap (0.5s to 2s, precision ms variety)
         inter_pause = 0
         if i > 0:
-            inter_pause = rng.randint(100, 500)
-            inter_pause += rng.randint(1, 9) 
-            total_inter_pause_ms += inter_pause
+            # Using randint(500, 2000) ensures 1501 unique possible MS values
+            inter_pause = rng.randint(500, 2000)
+            total_inter_file_gap_ms += inter_pause
                 
-        all_evs = merge_events_with_pauses(all_evs, evs, inter_pause)
+        merged_events = merge_events_with_pauses(merged_events, evs, inter_pause)
         
         letter = number_to_letters(i+1)
-        seg_dur = evs[-1]['Time'] - evs[0]['Time']
-        running_total_ms = all_evs[-1]['Time']
-        
-        manifest_lines.append(
-            f"  {letter}: {p.name} | Dur: {format_ms_precise(seg_dur)} (Inc. {format_ms_precise(added_internal_ms + added_delay_ms)} Random Gaps) | Total: {format_ms_precise(running_total_ms)}"
-        )
-    
-    if not all_evs: return None, None, None
-    
-    total_ms = all_evs[-1]['Time'] if all_evs else 0
-    total_dur_str = format_ms_precise(total_ms)
+        manifest_lines.append(f"  {letter}: {p.name} | Total: {format_ms_precise(merged_events[-1]['Time'])}")
+
+    # Rule 2 FINAL: Inject the accumulated pool as one single solid block in the merged timeline
+    if accumulated_afk_pool > 0:
+        merged_events = inject_single_afk_block(merged_events, accumulated_afk_pool, rng)
+
+    total_ms = merged_events[-1]['Time'] if merged_events else 0
+    total_combined_afk = accumulated_afk_pool + total_inter_file_gap_ms + total_micro_delay_ms
     
     v_code = number_to_letters(v_num)
     final_min_only = int(total_ms / 60000)
@@ -306,14 +228,20 @@ def generate_version_for_folder(rng, v_num, folder, selector, target_min, delay_
     
     manifest_entry = (
         f"FILENAME: {fname}\n"
-        f"TOTAL DURATION: {total_dur_str}\n"
-        f"TOTAL COMBINED AFK: {format_ms_precise(total_inter_pause_ms + total_internal_pause_ms)}\n"
-        f"  ├─ Internal delays/pauses: {format_ms_precise(total_internal_pause_ms)}\n"
-        f"  └─ Inter-file gaps: {format_ms_precise(total_inter_pause_ms)}\n"
+        f"TOTAL DURATION: {format_ms_precise(total_ms)}\n"
+        f"TOTAL COMBINED AFK: {format_ms_precise(total_combined_afk)}\n"
         f"COMPONENTS:\n" + "\n".join(manifest_lines) + "\n" + "-"*40
     )
     
-    return fname, all_evs, manifest_entry
+    return fname, merged_events, manifest_entry
+
+def merge_events_with_pauses(base: list[dict], new: list[dict], pause_ms: int) -> list[dict]:
+    if not new: return base
+    last_t = base[-1]['Time'] if base else 0
+    shift = last_t + pause_ms
+    shifted = deepcopy(new)
+    for e in shifted: e['Time'] = int(e.get('Time', 0)) + shift
+    return base + shifted
 
 def main():
     parser = argparse.ArgumentParser()
@@ -322,16 +250,12 @@ def main():
     parser.add_argument("--versions", type=int, default=6)
     parser.add_argument("--target-minutes", type=int, default=25)
     parser.add_argument("--delay-before-action-ms", type=int, default=0)
-    parser.add_argument("--between-max-time", type=int, default=0)
-    parser.add_argument("--exclude-count", type=int, default=0) 
     args = parser.parse_args()
 
     rng = random.Random()
     bundle_n = read_counter(COUNTER_PATH)
     bundle_dir = args.output_root / f"merged_bundle_{bundle_n}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"Starting merge for bundle {bundle_n}...")
     
     folders = find_all_dirs_with_json(args.input_root)
     for folder in folders:
