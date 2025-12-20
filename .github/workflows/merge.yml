@@ -8,11 +8,11 @@ on:
         required: true
         default: '6'
       target_minutes:
-        description: 'Target duration per merged file (uses round-robin queue)'
+        description: 'Target duration per merged file'
         required: true
         default: '25'
       delay_before_action_ms:
-        description: 'Delay Before Action (MS) - Inserts random gaps (0 to disable)'
+        description: 'Delay Before Action (MS)'
         required: true
         default: '10'
 
@@ -46,7 +46,6 @@ jobs:
       - name: Execute macro merge script
         run: |
           mkdir -p output
-          # Pass the BUNDLE_SEQ to the script so folder naming is perfectly synced
           python3 merge_macros.py \
             "input_macros" \
             "output" \
@@ -57,11 +56,9 @@ jobs:
             
       - name: Commit and Push Counter Update
         run: |
-          # Increment the local file manually to match the run
           NEW_VAL=$((BUNDLE_SEQ + 1))
           mkdir -p .github
           echo "$NEW_VAL" > .github/merge_bundle_counter.txt
-          
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add .github/merge_bundle_counter.txt
@@ -69,19 +66,17 @@ jobs:
           git push || echo "Push failed"
             
       - name: Create ZIP artifact
-        id: zip_step
         run: |
           BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
           ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
           
-          echo "Verifying generated files..."
+          echo "Checking directory structure before zipping..."
           ls -R output/
           
           if [ -d "output/$BUNDLE_NAME" ]; then
-            # Navigate into output so the ZIP doesn't contain the 'output/' prefix
             cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
           else
-            echo "Error: Directory output/$BUNDLE_NAME not found!"
+            echo "CRITICAL ERROR: Directory output/$BUNDLE_NAME was not created by the script!"
             exit 1
           fi
           echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
