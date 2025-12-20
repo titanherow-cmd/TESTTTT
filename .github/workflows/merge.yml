@@ -64,12 +64,18 @@ jobs:
       - name: Create ZIP artifact
         id: zip_step
         run: |
+          # The Python script creates output/merged_bundle_N
           BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
           ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
+          
+          echo "Looking for folder: output/$BUNDLE_NAME"
+          ls -R output/
+          
           if [ -d "output/$BUNDLE_NAME" ]; then
-            (cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME")
+            cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
           else
-            echo "No output found" > empty.txt && zip "$ZIP_FILE" empty.txt
+            echo "Error: Directory output/$BUNDLE_NAME not found!"
+            exit 1
           fi
           echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
 
