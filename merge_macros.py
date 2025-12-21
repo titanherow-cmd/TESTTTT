@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Robust File Discovery with Accurate Manifest Timings"""
+"""merge_macros.py - Discovery with Accurate Timings, Asset Preservation (including first/last files)"""
 
 from pathlib import Path
-import argparse, json, random, sys, os, math
+import argparse, json, random, sys, os, math, shutil
 from copy import deepcopy
 
 def load_json_events(path: Path):
@@ -39,30 +39,34 @@ def number_to_letters(n: int) -> str:
     return res or "A"
 
 class QueueFileSelector:
-    """Ensures we use all files in a folder before repeating any."""
-    def __init__(self, rng, all_files):
+    """Handles logic for the pool of mergeable files."""
+    def __init__(self, rng, all_mergeable_files):
         self.rng = rng
-        self.all_files = [str(f.resolve()) for f in all_files]
-        self.pool = list(self.all_files)
+        self.pool_src = [f for f in all_mergeable_files]
+        self.pool = list(self.pool_src)
         self.rng.shuffle(self.pool)
         
-    def get_files_for_time(self, target_minutes):
-        selected = []
+    def get_sequence(self, target_minutes):
+        sequence = []
         current_ms = 0.0
         target_ms = target_minutes * 60000
+        
+        if not self.pool_src:
+            return []
+
         while current_ms < target_ms:
             if not self.pool:
-                self.pool = list(self.all_files)
+                self.pool = list(self.pool_src)
                 self.rng.shuffle(self.pool)
             
-            pick = next((f for f in self.pool if f not in selected), self.pool[0])
-            dur = get_file_duration_ms(Path(pick))
-            selected.append(pick)
-            if pick in self.pool: self.pool.remove(pick)
+            pick = self.pool.pop(0)
+            sequence.append(str(pick.resolve()))
+            # Estimate: Duration + 30% buffer + 1.5s gap
+            current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
             
-            current_ms += (dur * 1.3) + 1500
-            if len(selected) > 150: break 
-        return selected
+            if len(sequence) > 150: break 
+        
+        return sequence
 
 def main():
     parser = argparse.ArgumentParser()
@@ -89,31 +93,50 @@ def main():
     
     folders_with_json = []
     seen_folders = set()
+    
+    # 1. Identify which files are "special" and which are for merging
     for p in search_root.rglob("*.json"):
-        if "click_zones" in p.name.lower() or "output" in p.parts or p.name.startswith('.'):
+        # Exclude output or hidden files
+        if "output" in p.parts or p.name.startswith('.'):
             continue
-        if p.parent not in seen_folders:
+            
+        # Define what makes a file "Special" (Excluded from merge)
+        is_special = any(x in p.name.lower() for x in ["click_zones", "first", "last"])
+        
+        if not is_special and p.parent not in seen_folders:
             folder = p.parent
-            jsons = sorted([f for f in folder.glob("*.json") if "click_zones" not in f.name.lower()])
-            if jsons:
-                folders_with_json.append((folder, jsons))
+            # Only JSONs that are NOT special go into the merge pool
+            mergeable_jsons = sorted([
+                f for f in folder.glob("*.json") 
+                if not any(x in f.name.lower() for x in ["click_zones", "first", "last"])
+            ])
+            if mergeable_jsons:
+                folders_with_json.append((folder, mergeable_jsons))
                 seen_folders.add(folder)
                 print(f"Found group: {folder.relative_to(search_root)}")
 
     if not folders_with_json:
-        print(f"CRITICAL ERROR: No JSON files found!")
+        print(f"CRITICAL ERROR: No mergeable JSON files found!")
         sys.exit(1)
 
-    for folder_path, json_files in folders_with_json:
+    for folder_path, mergeable_files in folders_with_json:
         rel_path = folder_path.relative_to(search_root)
         out_folder = bundle_dir / rel_path
         out_folder.mkdir(parents=True, exist_ok=True)
         
-        selector = QueueFileSelector(rng, json_files)
+        # --- PRESERVE ALL ASSETS ---
+        # Includes .png, click_zones, and now 'first'/'last' files
+        for item in folder_path.iterdir():
+            if item.is_file():
+                # If it's not in our mergeable list, copy it exactly as is
+                if item not in mergeable_files:
+                    shutil.copy2(item, out_folder / item.name)
+        
+        selector = QueueFileSelector(rng, mergeable_files)
         folder_manifest = [f"MANIFEST FOR FOLDER: {rel_path}\n{'='*40}\n"]
 
         for v in range(1, args.versions + 1):
-            selected_paths = selector.get_files_for_time(args.target_minutes)
+            selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
             
             merged_events = []
@@ -122,7 +145,6 @@ def main():
             total_gaps = 0
             is_time_sensitive = "time sensitive" in str(folder_path).lower()
             
-            # Temporary storage to track where files start/end before the final shift
             file_segments = []
 
             for i, p_str in enumerate(selected_paths):
@@ -145,7 +167,6 @@ def main():
                     merged_events.append(ne)
                 end_in_merge = len(merged_events) - 1
                 
-                # Keep track of the index range of this file in the merged list
                 file_segments.append({
                     "name": p.name,
                     "start_idx": start_in_merge,
@@ -158,8 +179,8 @@ def main():
                 
                 timeline_ms = merged_events[-1]["Time"]
 
-            # Apply AFK Pool and identify where the shift happens
-            shift_idx = len(merged_events) # Default to end (Time Sensitive)
+            # Apply AFK Pool
+            shift_idx = len(merged_events)
             if accumulated_afk > 0:
                 if not is_time_sensitive:
                     shift_idx = rng.randint(1, len(merged_events) - 1)
@@ -167,10 +188,8 @@ def main():
                 for k in range(shift_idx, len(merged_events)):
                     merged_events[k]["Time"] += accumulated_afk
 
-            # Generate manifest entries based on FINAL shifted times
             manifest_entry = [f"Version {number_to_letters(v)}:"]
             for seg in file_segments:
-                # The accurate end time is the timestamp of the last event of that segment
                 actual_end_time = merged_events[seg["end_idx"]]["Time"]
                 manifest_entry.append(f"  - {seg['name']} (Ends at {format_ms_precise(actual_end_time)})")
 
