@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - Discovery with Accurate Timings, Asset Preservation, and 3-Way Pause Reporting"""
+"""merge_macros.py - Discovery with Accurate Timings, Asset Preservation, and Advanced Humanization Rules"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil
@@ -26,6 +26,8 @@ def get_file_duration_ms(path: Path) -> int:
     except: return 0
 
 def format_ms_precise(ms: int) -> str:
+    if ms < 1000 and ms > 0:
+        return f"{ms}ms"
     total_seconds = int(ms / 1000)
     minutes = total_seconds // 60
     seconds = total_seconds % 60
@@ -61,7 +63,6 @@ class QueueFileSelector:
             
             pick = self.pool.pop(0)
             sequence.append(str(pick.resolve()))
-            # Estimate: Duration + 30% buffer + 1.5s gap
             current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
             
             if len(sequence) > 150: break 
@@ -135,7 +136,6 @@ def main():
             merged_events = []
             timeline_ms = 0
             
-            # --- 3 SEPARATE PAUSE TRACKERS ---
             total_delay_before_action = 0
             total_inter_file_gaps = 0
             total_afk_pool = 0
@@ -157,28 +157,38 @@ def main():
                 timeline_ms += gap
                 total_inter_file_gaps += gap
                 
-                # Rule 2: Delay Before Action
-                # Applied to every file in the sequence
-                dba = args.delay_before_action_ms
-                timeline_ms += dba
-                total_delay_before_action += dba
+                # PRE-CALCULATE RULE 2 (Micro-pauses) - Now inside the file
+                # We determine here if it's applied, but apply it during the event loop
+                dba_applied = 0
+                split_event_idx = -1
+                if args.delay_before_action_ms > 0:
+                    if rng.random() < 0.40: # 40% chance
+                        jitter = rng.randint(-118, 119)
+                        dba_applied = max(0, args.delay_before_action_ms + jitter)
+                        if len(raw) > 1:
+                            split_event_idx = rng.randint(1, len(raw) - 1)
+                        else:
+                            split_event_idx = 0
+                
+                total_delay_before_action += dba_applied
                 
                 start_in_merge = len(merged_events)
-                for e in raw:
+                file_segments.append(start_in_merge)
+
+                for event_idx, e in enumerate(raw):
                     ne = deepcopy(e)
-                    ne["Time"] = (int(e.get("Time", 0)) - base_t) + timeline_ms
+                    event_offset = (int(e.get("Time", 0)) - base_t)
+                    
+                    # Rule 2 Placement: If this is the chosen event, push it and all following ones
+                    if event_idx >= split_event_idx and split_event_idx != -1:
+                        event_offset += dba_applied
+                        
+                    ne["Time"] = event_offset + timeline_ms
                     merged_events.append(ne)
-                end_in_merge = len(merged_events) - 1
-                
-                file_segments.append({
-                    "name": p.name,
-                    "start_idx": start_in_merge,
-                    "end_idx": end_in_merge
-                })
                 
                 # Rule 3: AFK Pool calculation
                 if "screensharelink" not in p.name.lower():
-                    pct = rng.choice([0, 0, 0, 0.12, 0.20, 0.28])
+                    pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
                     total_afk_pool += int(dur * pct)
                 
                 timeline_ms = merged_events[-1]["Time"]
@@ -188,14 +198,13 @@ def main():
                 if is_time_sensitive:
                     merged_events[-1]["Time"] += total_afk_pool
                 else:
-                    shift_idx = rng.randint(1, len(merged_events) - 1)
-                    for k in range(shift_idx, len(merged_events)):
-                        merged_events[k]["Time"] += total_afk_pool
-
-            manifest_entry = [f"Version {number_to_letters(v)}:"]
-            for seg in file_segments:
-                actual_end_time = merged_events[seg["end_idx"]]["Time"]
-                manifest_entry.append(f"  - {seg['name']} (Ends at {format_ms_precise(actual_end_time)})")
+                    if len(file_segments) > 1:
+                        target_file_idx = rng.randint(1, len(file_segments) - 1)
+                        event_split_idx = file_segments[target_file_idx]
+                        for k in range(event_split_idx, len(merged_events)):
+                            merged_events[k]["Time"] += total_afk_pool
+                    else:
+                        merged_events[-1]["Time"] += total_afk_pool
 
             final_dur = merged_events[-1]["Time"]
             v_code = number_to_letters(v)
@@ -205,10 +214,11 @@ def main():
             
             all_humanization = total_delay_before_action + total_inter_file_gaps + total_afk_pool
             
+            manifest_entry = [f"Version {v_code}:"]
             manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(final_dur)}")
             manifest_entry.append(f"  TOTAL AFK TIME: {format_ms_precise(all_humanization)}")
             manifest_entry.append(f"  PAUSE BREAKDOWN:")
-            manifest_entry.append(f"    - Delay Before Action: {format_ms_precise(total_delay_before_action)}")
+            manifest_entry.append(f"    - Micro-pauses (Inside Files): {format_ms_precise(total_delay_before_action)}")
             manifest_entry.append(f"    - Inter-file Gaps (0.5-2.5s): {format_ms_precise(total_inter_file_gaps)}")
             manifest_entry.append(f"    - Human AFK Pool (Thinking): {format_ms_precise(total_afk_pool)}")
             manifest_entry.append("-" * 20)
