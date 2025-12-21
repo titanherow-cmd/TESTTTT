@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Triples humanization values for Inefficient versions and respects 60m cap"""
+"""merge_macros.py - AFK Priority Logic: Extra Inefficient versions (1 per 3 normal), ¬¬¬ prefix, and 60m cap"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil
@@ -31,6 +31,8 @@ def format_ms_precise(ms: int) -> str:
     total_seconds = int(ms / 1000)
     minutes = total_seconds // 60
     seconds = total_seconds % 60
+    if minutes == 0:
+        return f"{seconds}s"
     return f"{minutes}m {seconds}s"
 
 def number_to_letters(n: int) -> str:
@@ -113,39 +115,35 @@ def main():
         selector = QueueFileSelector(rng, mergeable_files)
         folder_manifest = [f"MANIFEST FOR FOLDER: {rel_path}\n{'='*40}\n"]
 
-        for v in range(1, args.versions + 1):
-            is_inefficient = (v % 4 == 0)
+        versions_to_process = []
+        for i in range(1, args.versions + 1):
+            versions_to_process.append(False) # Normal
+            if i % 3 == 0:
+                versions_to_process.append(True) # Extra Inefficient
+        
+        for idx, is_inefficient in enumerate(versions_to_process):
+            v_num = idx + 1
             afk_multiplier = 3 if is_inefficient else 1
             
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
             
-            # --- PHASE 1: PRE-CALCULATE ALL MASSIVE PAUSES ---
             massive_p1 = rng.randint(5 * 60 * 1000, 10 * 60 * 1000) if is_inefficient else 0
             massive_p2 = rng.randint(10 * 60 * 1000, 17 * 60 * 1000) if is_inefficient else 0
             
-            # --- PHASE 2: CALCULATE DURATIONS AND TRIM TO FIT 60 MINS ---
             MAX_MS = 60 * 60 * 1000
             
-            # Loop until the sequence of files + pauses fits under 60 minutes
             while True:
                 temp_total_dur = massive_p1 + massive_p2
-                
                 for i, p_str in enumerate(selected_paths):
                     p = Path(p_str)
                     dur = get_file_duration_ms(p)
-                    # Triple the gaps for inefficient versions
                     gap = (rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier
-                    
-                    # Estimate Rule 3 AFK (Normal AFK Pool) - Triple for inefficient
                     afk_pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
                     afk_val = (int(dur * afk_pct) if "screensharelink" not in p.name.lower() else 0) * afk_multiplier
-                    
-                    # Rule 2 DBA (Micro-pause) - Triple for inefficient
                     dba_val = 0
                     if rng.random() < 0.40:
                         dba_val = (max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier
-                    
                     temp_total_dur += dur + gap + afk_val + dba_val
 
                 if temp_total_dur <= MAX_MS or len(selected_paths) <= 1:
@@ -153,7 +151,6 @@ def main():
                 else:
                     selected_paths.pop()
 
-            # --- PHASE 3: ACTUAL MERGE ---
             merged_events = []
             timeline_ms = 0
             total_dba = 0
@@ -170,12 +167,10 @@ def main():
                 base_t = min(t_vals) if t_vals else 0
                 dur = (max(t_vals) - base_t) if t_vals else 0
                 
-                # Rule 1: Gaps (Multiplied)
                 gap = (rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier
                 timeline_ms += gap
                 total_gaps += gap
                 
-                # Rule 2: DBA (Multiplied)
                 dba_val = 0
                 split_idx = -1
                 if rng.random() < 0.40:
@@ -192,15 +187,11 @@ def main():
                     merged_events.append(ne)
                 
                 file_segments.append({"name": p.name, "start_idx": start_in_merge, "end_idx": len(merged_events)-1})
-                
-                # Rule 3: Normal AFK (Multiplied)
                 if "screensharelink" not in p.name.lower():
                     pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
                     total_afk_pool += (int(dur * pct)) * afk_multiplier
-                
                 timeline_ms = merged_events[-1]["Time"]
 
-            # Step 1: Normal AFK injection
             is_ts = "time sensitive" in str(folder_path).lower()
             if total_afk_pool > 0:
                 if is_ts: merged_events[-1]["Time"] += total_afk_pool
@@ -209,7 +200,6 @@ def main():
                     split_pt = file_segments[target_idx]["start_idx"] if len(file_segments) > 1 else len(merged_events)-1
                     for k in range(split_pt, len(merged_events)): merged_events[k]["Time"] += total_afk_pool
 
-            # Step 2: Massive Inefficiency Injection
             if is_inefficient:
                 if is_ts: merged_events[-1]["Time"] += (massive_p1 + massive_p2)
                 else:
@@ -220,25 +210,34 @@ def main():
                         for k in range(idx2, len(merged_events)): merged_events[k]["Time"] += massive_p2
                     else: merged_events[-1]["Time"] += (massive_p1 + massive_p2)
 
-            v_code = number_to_letters(v)
-            prefix = "***" if is_inefficient else ""
+            v_code = number_to_letters(v_num)
+            prefix = "¬¬¬" if is_inefficient else ""
             final_dur = merged_events[-1]["Time"]
             fname = f"{prefix}{v_code}_{int(final_dur / 60000)}m.json"
             (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
             
-            manifest_entry = [f"Version {v_code}{' [SPECIAL - TRIPLED AFK]' if is_inefficient else ''}:"]
-            for seg in file_segments:
-                manifest_entry.append(f"  - {seg['name']} (Ends at {format_ms_precise(merged_events[seg['end_idx']]['Time'])})")
+            # Formatting the Manifest for this version
+            total_human_pause = total_dba + total_gaps + total_afk_pool + massive_p1 + massive_p2
             
+            v_title = f"Version {v_code}{' [EXTRA - INEFFICIENT]' if is_inefficient else ''}:"
+            manifest_entry = [v_title]
             manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(final_dur)}")
-            manifest_entry.append(f"  PAUSE BREAKDOWN (Multiplier: {afk_multiplier}x):")
+            manifest_entry.append(f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:")
             manifest_entry.append(f"    - Micro-pauses: {format_ms_precise(total_dba)}")
             manifest_entry.append(f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}")
             manifest_entry.append(f"    - Normal AFK Pool: {format_ms_precise(total_afk_pool)}")
             if is_inefficient:
                 manifest_entry.append(f"    - Massive P1: {format_ms_precise(massive_p1)}")
                 manifest_entry.append(f"    - Massive P2: {format_ms_precise(massive_p2)}")
-            manifest_entry.append("-" * 20)
+            
+            manifest_entry.append("") # Blank line before files
+            
+            for i, seg in enumerate(file_segments):
+                bullet = "*" if i < 11 else "-" # Example showed * then - after 11 items
+                end_time_str = format_ms_precise(merged_events[seg['end_idx']]['Time'])
+                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {end_time_str})")
+            
+            manifest_entry.append("-" * 30)
             folder_manifest.append("\n".join(manifest_entry))
 
         (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
