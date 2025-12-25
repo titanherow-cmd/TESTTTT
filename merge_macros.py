@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal (x2 or x3), Ineff x3, TS x1, Originals Filter, 2:1 Ratio"""
+"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, or x3), Ineff x3, TS x1, Originals Filter, 2:1 Ratio"""
 
 from pathlib import Path
 import argparse, json, random, sys, os, math, shutil
@@ -90,8 +90,6 @@ def main():
     # Ensure we search inside the 'originals' folder
     search_root = args.input_root / "originals"
     if not search_root.exists():
-        # Fallback to current dir if 'originals' doesn't exist, 
-        # but the prompt requirement asks to ensure it is used.
         search_root = Path("originals")
         if not search_root.exists():
             print("Error: 'originals' folder not found.")
@@ -104,7 +102,6 @@ def main():
     folders_with_json = []
     seen_folders = set()
     
-    # Strictly looking inside originals/ subfolders
     for p in search_root.rglob("*.json"):
         if "output" in p.parts or p.name.startswith('.'): continue
         is_special = any(x in p.name.lower() for x in ["click_zones", "first", "last"])
@@ -141,17 +138,16 @@ def main():
         for idx, is_inefficient in enumerate(versions_to_process):
             v_num = idx + 1
             
-            # RULE UPDATES:
-            # 1. Inefficient files stay at x3 multiplier.
-            # 2. Normal files get a 50/50 chance of x2 or x3 multiplier.
-            # 3. Time Sensitive folders stay at x1 multiplier.
+            # MULTIPLIER LOGIC:
+            # 1. Time Sensitive folders: Always x1
+            # 2. Inefficient files: Always x3
+            # 3. Normal files: Three-way chance (x1, x2, or x3)
             if is_ts:
                 afk_multiplier = 1
             elif is_inefficient:
                 afk_multiplier = 3
             else:
-                # 50-50 chance for normal files
-                afk_multiplier = rng.choice([2, 3])
+                afk_multiplier = rng.choice([1, 2, 3])
             
             selected_paths = selector.get_sequence(args.target_minutes)
             if not selected_paths: continue
