@@ -204,7 +204,15 @@ def main():
         
         out_f = bundle_dir / numbered_rel_path
         out_f.mkdir(parents=True, exist_ok=True)
-        manifest = [f"FOLDER: {numbered_rel_path} (#{folder_number})", f"TS MODE: {data['is_ts']}", f"JITTER: 0-{args.delay_before_action_ms}ms (individual per event)", ""]
+        
+        # ✅ NEW: Manifest header with total files available
+        manifest = [
+            f"MANIFEST FOR FOLDER: {numbered_rel_path}",
+            "=" * 40,
+            f"Total Available Files: {len(data['files'])}",
+            "",
+            ""
+        ]
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
@@ -258,13 +266,43 @@ def main():
                 split = rng.randint(0, len(merged) - 2)
                 for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
                 timeline = merged[-1]["Time"]
-                manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
+                massive_pause_info = f"Massive P1: {format_ms_precise(p_ms)}"  # ✅ Track massive pause
+            else:
+                massive_pause_info = None
 
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
-            manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
+            
+            # ✅ FIXED: Jitter is separate, NOT included in total pause
+            total_pause = total_gaps + total_afk_pool  # ✅ Removed jitter from total
+            if massive_pause_info:
+                version_label = f"Version {v_code} [EXTRA - INEFFICIENT] (Multiplier: x{mult}):"
+            else:
+                version_label = f"Version {v_code} (Multiplier: x{mult}):"
+            
+            manifest_entry = [
+                version_label,
+                f"  TOTAL DURATION: {format_ms_precise(timeline)}",
+                f"  Total Jitter Added: {format_ms_precise(total_jitter_ms)}",  # ✅ Separate entry
+                f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:",
+                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}",
+                f"    - AFK Pool: {format_ms_precise(total_afk_pool)}"
+            ]
+            
+            if massive_pause_info:
+                manifest_entry.append(f"    - {massive_pause_info}")
+            
+            manifest_entry.append("")  # Blank line
+            
+            # ✅ NEW: List files with end times
+            for idx, seg in enumerate(file_segments):
+                bullet = "*" if idx < 11 else "-"
+                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
+            
+            manifest_entry.append("-" * 30)
+            manifest.append("\n".join(manifest_entry))
 
-        # ✅ NEW: Add folder number to manifest filename
+        # ✅ NEW: Write manifest with proper formatting
         (out_f / f"!_MANIFEST_{folder_number}_!").write_text("\n".join(manifest))
 
 if __name__ == "__main__":
