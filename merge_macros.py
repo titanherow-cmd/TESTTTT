@@ -260,19 +260,13 @@ def main():
                     merged.append(ne)
                 
                 timeline = merged[-1]["Time"]
-
-            if is_inef and not data["is_ts"] and len(merged) > 1:
-                p_ms = rng.randint(300000, 720000)
-                split = rng.randint(0, len(merged) - 2)
-                for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
-                timeline = merged[-1]["Time"]
-                massive_pause_info = f"Massive P1: {format_ms_precise(p_ms)}"  # ✅ Track massive pause
-
+            
+            # ✅ FIXED: Calculate totals AFTER the loop completes
             fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
-            # ✅ FIXED: Jitter is separate, NOT included in total pause
-            total_pause = total_gaps + total_afk_pool  # ✅ Removed jitter from total
+            # Now calculate total_pause using the accumulated values
+            total_pause = total_gaps + total_afk_pool  # ✅ Variables are now defined
             if massive_pause_info:
                 version_label = f"Version {v_code} [EXTRA - INEFFICIENT] (Multiplier: x{mult}):"
             else:
