@@ -147,9 +147,17 @@ def main():
     
     for key, data in pools.items():
         folder_number = folder_numbers[key]  # Get assigned folder number
-        out_f = bundle_dir / data["rel_path"]
+        
+        # ✅ NEW: Prefix folder name with number (e.g., "1-D_WC")
+        original_rel_path = data["rel_path"]
+        folder_name = original_rel_path.name  # Get last part of path
+        parent_path = original_rel_path.parent  # Get parent directories
+        numbered_folder_name = f"{folder_number}-{folder_name}"  # Add number prefix
+        numbered_rel_path = parent_path / numbered_folder_name  # Reconstruct path
+        
+        out_f = bundle_dir / numbered_rel_path
         out_f.mkdir(parents=True, exist_ok=True)
-        manifest = [f"FOLDER: {data['rel_path']} (#{folder_number})", f"TS MODE: {data['is_ts']}", f"JITTER: 0-{args.delay_before_action_ms}ms", ""]
+        manifest = [f"FOLDER: {numbered_rel_path} (#{folder_number})", f"TS MODE: {data['is_ts']}", f"JITTER: 0-{args.delay_before_action_ms}ms", ""]
         
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
@@ -211,7 +219,8 @@ def main():
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
 
-        (out_f / "!_MANIFEST_!").write_text("\n".join(manifest))
+        # ✅ NEW: Add folder number to manifest filename
+        (out_f / f"!_MANIFEST_{folder_number}_!").write_text("\n".join(manifest))
 
 if __name__ == "__main__":
     main()
