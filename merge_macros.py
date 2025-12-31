@@ -182,7 +182,7 @@ def main():
                     
                     # --- MOUSE JITTER INJECTION ---
                     # If we have a significant delay (>100ms) and the event has coordinates
-                    if jitter > 100 and "X" in e and "Y" in e:
+                    if jitter > 100 and "X" in e and "Y" in e and e["X"] is not None and e["Y"] is not None:
                         jitter_event = deepcopy(e)
                         # Offset the mouse by a small random amount (radius of 5px)
                         jitter_event["X"] = int(e["X"]) + rng.randint(-5, 5)
