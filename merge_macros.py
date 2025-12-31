@@ -1,20 +1,40 @@
 #!/usr/bin/env python3
-"""merge_macros.py - AFK Priority Logic: Normal (x1, x2, or x3), Ineff x3, TS x1, Originals Filter, 2:1 Ratio, Rounded to Seconds"""
+"""
+merge_macros.py - STABLE RESTORE POINT (v3.1.0)
+- FEATURE: Random 0-1500ms jitter rolled individually BEFORE every action.
+- FEATURE: Pre-Action Mouse Jitter. If delay > 100ms, injects a micro-move
+           within a 5px radius that resolves before the click.
+- FIX: Exact original directory structure is preserved.
+- FIX: Naming scheme A, B, C... (e.g., A_35m.json).
+- Massive Pause: One random event injection per inefficient file (300s-720s).
+- Identity Engine: Robust regex for " - Copy" and "Z_" variation pooling.
+- Manifest: Named '!_MANIFEST_!' for maximum visibility.
+"""
 
+import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
-import argparse, json, random, sys, os, math, shutil
 from copy import deepcopy
 
 def load_json_events(path: Path):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        events = []
         if isinstance(data, dict):
+            found_list = None
             for k in ("events", "items", "entries", "records"):
-                if k in data and isinstance(data[k], list): return deepcopy(data[k])
-            return [data] if "Time" in data else []
-        return deepcopy(data) if isinstance(data, list) else []
-    except Exception as e:
-        print(f"Error loading {path.name}: {e}")
+                if k in data and isinstance(data[k], list):
+                    found_list = data[k]
+                    break
+            events = found_list if found_list is not None else ([data] if "Time" in data else [])
+        elif isinstance(data, list):
+            events = data
+        
+        cleaned = []
+        for e in events:
+            if isinstance(e, list) and len(e) > 0: e = e[0]
+            if isinstance(e, dict) and "Time" in e: cleaned.append(e)
+        return deepcopy(cleaned)
+    except Exception:
         return []
 
 def get_file_duration_ms(path: Path) -> int:
@@ -26,253 +46,172 @@ def get_file_duration_ms(path: Path) -> int:
     except: return 0
 
 def format_ms_precise(ms: int) -> str:
-    # Since we are rounding to seconds, this helper will now reflect clean intervals
-    if ms < 1000 and ms > 0:
-        return f"{ms}ms"
-    total_seconds = int(round(ms / 1000))
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
-    if minutes == 0:
-        return f"{seconds}s"
-    return f"{minutes}m {seconds}s"
+    ts = int(round(ms / 1000))
+    m, s = ts // 60, ts % 60
+    return f"{m}m {s}s" if m > 0 else f"{s}s"
 
-def round_to_sec(ms: int) -> int:
-    """Rounds a millisecond value to the nearest 1000ms increment."""
-    return int(round(ms / 1000.0) * 1000)
-
-def number_to_letters(n: int) -> str:
-    res = ""
-    while n > 0:
-        n, rem = divmod(n - 1, 26)
-        res = chr(65 + rem) + res
-    return res or "A"
+def clean_identity(name: str) -> str:
+    return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
 
 class QueueFileSelector:
-    def __init__(self, rng, all_mergeable_files):
+    def __init__(self, rng, all_files):
         self.rng = rng
-        self.pool_src = [f for f in all_mergeable_files]
-        self.pool = list(self.pool_src)
-        self.rng.shuffle(self.pool)
-        
-    def get_sequence(self, target_minutes):
-        sequence = []
-        current_ms = 0.0
-        target_ms = target_minutes * 60000
-        
-        if not self.pool_src:
-            return []
+        self.efficient = [f for f in all_files if "¬¬¬" not in f.name]
+        self.inefficient = [f for f in all_files if "¬¬¬" in f.name]
+        self.eff_pool = list(self.efficient)
+        self.ineff_pool = list(self.inefficient)
+        self.rng.shuffle(self.eff_pool)
+        self.rng.shuffle(self.ineff_pool)
 
-        while current_ms < target_ms:
-            if not self.pool:
-                self.pool = list(self.pool_src)
-                self.rng.shuffle(self.pool)
-            
-            pick = self.pool.pop(0)
-            sequence.append(str(pick.resolve()))
-            current_ms += (get_file_duration_ms(pick) * 1.3) + 1500
-            if len(sequence) > 150: break 
-        
-        return sequence
+    def get_sequence(self, target_minutes, force_inef=False, strictly_eff=False):
+        seq, cur_ms = [], 0.0
+        target_ms = target_minutes * 60000
+        actual_force = force_inef if not strictly_eff else False
+        while cur_ms < target_ms:
+            if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
+            elif self.eff_pool: pick = self.eff_pool.pop(0)
+            elif self.efficient:
+                self.eff_pool = list(self.efficient); self.rng.shuffle(self.eff_pool)
+                pick = self.eff_pool.pop(0)
+            elif self.ineff_pool and not strictly_eff: pick = self.ineff_pool.pop(0)
+            else: break
+            seq.append(pick)
+            cur_ms += (get_file_duration_ms(pick) + 1500)
+            if len(seq) > 1000: break
+        return seq
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_root", type=Path)
+    parser.add_argument("input_root", type=str)
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--versions", type=int, default=6)
-    parser.add_argument("--target-minutes", type=int, default=25)
-    parser.add_argument("--delay-before-action-ms", type=int, default=10)
+    parser.add_argument("--target-minutes", type=int, default=35)
+    parser.add_argument("--delay-before-action-ms", type=int, default=1500) 
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
-    args, unknown = parser.parse_known_args()
+    args = parser.parse_args()
 
-    try:
-        parts = args.speed_range.replace(',', ' ').split()
-        s_min = float(parts[0])
-        s_max = float(parts[1]) if len(parts) > 1 else s_min
-    except:
-        s_min, s_max = 1.0, 1.0
+    search_base = Path(args.input_root).resolve()
+    if not search_base.exists():
+        search_base = Path(".").resolve()
+        
+    originals_root = None
+    for d in ["originals", "input_macros"]:
+        test_path = search_base / d
+        if test_path.exists() and test_path.is_dir():
+            originals_root = test_path
+            break
+            
+    if not originals_root:
+        originals_root = search_base
 
-    search_root = args.input_root / "originals"
-    if not search_root.exists():
-        search_root = Path("originals")
-        if not search_root.exists():
-            print("Error: 'originals' folder not found.")
-            sys.exit(1)
-
-    rng = random.Random()
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
+    rng = random.Random()
+    pools = {}
+
+    # 1. Discovery
+    for root, dirs, files in os.walk(originals_root):
+        curr = Path(root)
+        if any(p in curr.parts for p in [".git", ".github", "output"]): continue
+        jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
+        if not jsons: continue
+        macro_id = clean_identity(curr.name)
+        rel_path = curr.relative_to(originals_root)
+        if any(p.lower().startswith("z_") for p in rel_path.parts): continue
+
+        key = str(rel_path).lower()
+        if key not in pools:
+            is_ts = bool(re.search(r'time[\s-]*sens', key))
+            pools[key] = {
+                "rel_path": rel_path,
+                "files": [curr / f for f in jsons],
+                "is_ts": is_ts,
+                "macro_id": macro_id
+            }
+
+    # 2. Z-Variation Injection
+    for root, dirs, files in os.walk(originals_root):
+        curr = Path(root)
+        if not any(p.lower().startswith("z_") for p in curr.parts): continue
+        zid = clean_identity(curr.name)
+        jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
+        for pk, pd in pools.items():
+            if pd["macro_id"] == zid:
+                pd["files"].extend([curr / f for f in jsons])
+
+    # 3. Merging Logic
+    # ✅ NEW: Sort pools alphabetically and assign folder numbers
+    sorted_pool_keys = sorted(pools.keys())
+    folder_numbers = {key: idx + 1 for idx, key in enumerate(sorted_pool_keys)}
     
-    folders_with_json = []
-    seen_folders = set()
-    
-    for p in search_root.rglob("*.json"):
-        if "output" in p.parts or p.name.startswith('.'): continue
-        is_special = any(x in p.name.lower() for x in ["click_zones", "first", "last"])
-        if not is_special and p.parent not in seen_folders:
-            folder = p.parent
-            mergeable_jsons = sorted([
-                f for f in folder.glob("*.json") 
-                if not any(x in f.name.lower() for x in ["click_zones", "first", "last"])
-            ])
-            if mergeable_jsons:
-                folders_with_json.append((folder, mergeable_jsons))
-                seen_folders.add(folder)
-
-    for folder_path, mergeable_files in folders_with_json:
-        rel_path = folder_path.relative_to(search_root)
-        out_folder = bundle_dir / rel_path
-        out_folder.mkdir(parents=True, exist_ok=True)
+    for key, data in pools.items():
+        folder_number = folder_numbers[key]  # Get assigned folder number
+        out_f = bundle_dir / data["rel_path"]
+        out_f.mkdir(parents=True, exist_ok=True)
+        manifest = [f"FOLDER: {data['rel_path']} (#{folder_number})", f"TS MODE: {data['is_ts']}", f"JITTER: 0-{args.delay_before_action_ms}ms", ""]
         
-        is_ts = "time sensitive" in str(folder_path).lower()
+        norm_v = args.versions
+        inef_v = 0 if data["is_ts"] else (norm_v // 2)
         
-        for item in folder_path.iterdir():
-            if item.is_file() and item not in mergeable_files and "click_zones" not in item.name:
-                shutil.copy2(item, out_folder / item.name)
-        
-        selector = QueueFileSelector(rng, mergeable_files)
-        folder_manifest = [f"MANIFEST FOR FOLDER: {rel_path}\n{'='*40}\n"]
-
-        versions_to_process = []
-        for i in range(1, args.versions + 1):
-            versions_to_process.append(False) # Normal
-            if i % 2 == 0:
-                versions_to_process.append(True) # Extra Inefficient
-        
-        for idx, is_inefficient in enumerate(versions_to_process):
-            v_num = idx + 1
+        for v_idx in range(1, (norm_v + inef_v) + 1):
+            is_inef = (v_idx > norm_v)
+            v_letter = chr(64 + v_idx)
+            v_code = f"{v_letter}{folder_number}"  # ✅ Add folder number after letter
             
-            if is_ts:
-                afk_multiplier = 1
-            elif is_inefficient:
-                afk_multiplier = 3
-            else:
-                afk_multiplier = rng.choice([1, 2, 3])
+            if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
+            elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
+            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
-            selected_paths = selector.get_sequence(args.target_minutes)
-            if not selected_paths: continue
+            paths = QueueFileSelector(rng, data["files"]).get_sequence(args.target_minutes, is_inef, data["is_ts"])
+            merged, timeline = [], 0
+            total_jitter = 0
             
-            # Massive pauses are chosen in MS but rounded to sec for the logic later
-            massive_p1 = round_to_sec(rng.randint(5 * 60 * 1000, 10 * 60 * 1000)) if is_inefficient else 0
-            massive_p2 = round_to_sec(rng.randint(10 * 60 * 1000, 17 * 60 * 1000)) if is_inefficient else 0
-            
-            MAX_MS = 60 * 60 * 1000
-            speed = rng.uniform(s_min, s_max)
-            
-            while True:
-                temp_total_dur = massive_p1 + massive_p2
-                for i, p_str in enumerate(selected_paths):
-                    p = Path(p_str)
-                    dur = get_file_duration_ms(p) * speed
-                    # Gaps/Pauses are calculated with full MS randomness, then rounded
-                    gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
-                    afk_pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
-                    afk_val = round_to_sec((int(dur * afk_pct) if "screensharelink" not in p.name.lower() else 0) * afk_multiplier)
-                    dba_val = 0
-                    if rng.random() < 0.40:
-                        dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
-                    temp_total_dur += dur + gap + afk_val + dba_val
-
-                if temp_total_dur <= MAX_MS or len(selected_paths) <= 1:
-                    break
-                else:
-                    selected_paths.pop()
-
-            merged_events = []
-            timeline_ms = 0
-            total_dba = 0
-            total_gaps = 0
-            total_afk_pool = 0
-            file_segments = []
-
-            for i, p_str in enumerate(selected_paths):
-                p = Path(p_str)
+            for i, p in enumerate(paths):
                 raw = load_json_events(p)
                 if not raw: continue
+                t_vals = [int(e["Time"]) for e in raw]
+                base_t = min(t_vals)
                 
-                t_vals = [int(e.get("Time", 0)) for e in raw]
-                base_t = min(t_vals) if t_vals else 0
-                dur = (max(t_vals) - base_t) if t_vals else 0
+                gap = int(rng.randint(500, 2500) * mult) if i > 0 else 0
+                timeline += gap
                 
-                # Apply rounding to the random gap
-                gap = round_to_sec((rng.randint(500, 2500) if i > 0 else 0) * afk_multiplier)
-                timeline_ms += gap
-                total_gaps += gap
-                
-                dba_val = 0
-                split_idx = -1
-                if rng.random() < 0.40:
-                    # Apply rounding to the micro-pause
-                    dba_val = round_to_sec((max(0, args.delay_before_action_ms + rng.randint(-118, 119))) * afk_multiplier)
-                    if len(raw) > 1: split_idx = rng.randint(1, len(raw) - 1)
-                total_dba += dba_val
-                
-                start_in_merge = len(merged_events)
-                for ev_idx, e in enumerate(raw):
+                for e_idx, e in enumerate(raw):
+                    rel_offset = int(int(e["Time"]) - base_t)
+                    jitter = rng.randint(0, args.delay_before_action_ms)
+                    
+                    # --- MOUSE JITTER INJECTION ---
+                    # If we have a significant delay (>100ms) and the event has coordinates
+                    if jitter > 100 and "X" in e and "Y" in e:
+                        jitter_event = deepcopy(e)
+                        # Offset the mouse by a small random amount (radius of 5px)
+                        jitter_event["X"] = int(e["X"]) + rng.randint(-5, 5)
+                        jitter_event["Y"] = int(e["Y"]) + rng.randint(-5, 5)
+                        # Set this event type to "Move" or "None" to ensure it doesn't click
+                        jitter_event["Type"] = "Move" 
+                        # Occurs mid-jitter window
+                        jitter_event["Time"] = timeline + rel_offset + total_jitter + (jitter // 2)
+                        merged.append(jitter_event)
+
+                    total_jitter += jitter
                     ne = deepcopy(e)
-                    off = (int(e.get("Time", 0)) - base_t) * speed
-                    # Inner action timing remains natural, only pauses are rounded to sec
-                    if ev_idx >= split_idx and split_idx != -1: off += dba_val
-                    ne["Time"] = int(off + timeline_ms)
-                    merged_events.append(ne)
+                    ne["Time"] = timeline + rel_offset + total_jitter
+                    merged.append(ne)
                 
-                file_segments.append({"name": p.name, "start_idx": start_in_merge, "end_idx": len(merged_events)-1})
-                
-                if "screensharelink" not in p.name.lower():
-                    pct = rng.choices([0, 0.12, 0.20, 0.28], weights=[55, 20, 15, 10])[0]
-                    # Apply rounding to the AFK pool contribution
-                    total_afk_pool += round_to_sec((int(dur * speed * pct)) * afk_multiplier)
-                
-                timeline_ms = merged_events[-1]["Time"]
+                timeline = merged[-1]["Time"]
 
-            # Final injections also use rounded values
-            if total_afk_pool > 0:
-                if is_ts: merged_events[-1]["Time"] += total_afk_pool
-                else:
-                    target_idx = rng.randint(1, len(file_segments)-1) if len(file_segments) > 1 else 0
-                    split_pt = file_segments[target_idx]["start_idx"] if len(file_segments) > 1 else len(merged_events)-1
-                    for k in range(split_pt, len(merged_events)): merged_events[k]["Time"] += total_afk_pool
+            if is_inef and not data["is_ts"] and len(merged) > 1:
+                p_ms = rng.randint(300000, 720000)
+                split = rng.randint(0, len(merged) - 2)
+                for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
+                timeline = merged[-1]["Time"]
+                manifest.append(f"Version {v_code} (Inef): Pause {p_ms}ms at index {split}")
 
-            if is_inefficient:
-                if is_ts: merged_events[-1]["Time"] += (massive_p1 + massive_p2)
-                else:
-                    if len(merged_events) > 20:
-                        idx1 = rng.randint(10, len(merged_events) // 2)
-                        idx2 = rng.randint(len(merged_events) // 2 + 1, len(merged_events) - 10)
-                        for k in range(idx1, len(merged_events)): merged_events[k]["Time"] += massive_p1
-                        for k in range(idx2, len(merged_events)): merged_events[k]["Time"] += massive_p2
-                    else: merged_events[-1]["Time"] += (massive_p1 + massive_p2)
+            fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            (out_f / fname).write_text(json.dumps(merged, indent=2))
+            manifest.append(f"  {v_code}: {format_ms_precise(timeline)} (Mult: x{mult})")
 
-            v_code = number_to_letters(v_num)
-            prefix = "¬¬¬" if is_inefficient else ""
-            final_dur = merged_events[-1]["Time"]
-            fname = f"{prefix}{v_code}_{int(final_dur / 60000)}m.json"
-            (out_folder / fname).write_text(json.dumps(merged_events, indent=2))
-            
-            total_human_pause = total_dba + total_gaps + total_afk_pool + massive_p1 + massive_p2
-            v_title = f"Version {v_code}{' [EXTRA - INEFFICIENT]' if is_inefficient else ''} (Multiplier: x{afk_multiplier}):"
-            manifest_entry = [v_title]
-            manifest_entry.append(f"  TOTAL DURATION: {format_ms_precise(final_dur)}")
-            manifest_entry.append(f"  total PAUSE: {format_ms_precise(total_human_pause)} +BREAKDOWN:")
-            manifest_entry.append(f"    - Micro-pauses: {format_ms_precise(total_dba)}")
-            manifest_entry.append(f"    - Inter-file Gaps: {format_ms_precise(total_gaps)}")
-            manifest_entry.append(f"    - AFK Pool: {format_ms_precise(total_afk_pool)}")
-            if is_inefficient:
-                manifest_entry.append(f"    - Massive P1: {format_ms_precise(massive_p1)}")
-                manifest_entry.append(f"    - Massive P2: {format_ms_precise(massive_p2)}")
-            
-            manifest_entry.append("")
-            for i, seg in enumerate(file_segments):
-                bullet = "*" if i < 11 else "-"
-                end_time_str = format_ms_precise(merged_events[seg['end_idx']]['Time'])
-                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {end_time_str})")
-            
-            manifest_entry.append("-" * 30)
-            folder_manifest.append("\n".join(manifest_entry))
-
-        (out_folder / "manifest.txt").write_text("\n\n".join(folder_manifest))
-
-    print(f"--- SUCCESS: Bundle {args.bundle_id} created ---")
+        (out_f / "!_MANIFEST_!").write_text("\n".join(manifest))
 
 if __name__ == "__main__":
     main()
