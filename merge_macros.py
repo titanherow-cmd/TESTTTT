@@ -51,6 +51,16 @@ def format_ms_precise(ms: int) -> str:
 def clean_identity(name: str) -> str:
     return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
 
+def extract_folder_number(folder_name: str) -> int:
+    """
+    Extract number from folder name like '1-Mining' or '23-Fishing'.
+    Returns the number, or 0 if not found.
+    """
+    match = re.match(r'^(\d+)-', folder_name)
+    if match:
+        return int(match.group(1))
+    return 0
+
 def insert_idle_mouse_movements(events, rng, movement_percentage):
     """
     Insert realistic mouse movements during idle periods (gaps > 5 seconds).
@@ -243,27 +253,32 @@ def main():
         if z_key in z_storage:
             pool_data["files"].extend(z_storage[z_key])
     
-    # ✅ FIX #3: Filter out "always first" and "always last" files from merging
+    # Filter out "always first" and "always last" files from merging
     for pool_key, pool_data in pools.items():
         all_files = pool_data["files"]
         always_files = [f for f in all_files if Path(f).name.lower().startswith(("always first", "always last", "-always first", "-always last"))]
         mergeable_files = [f for f in all_files if f not in always_files]
         pool_data["files"] = mergeable_files
         pool_data["always_files"] = always_files
-
-    sorted_pool_keys = sorted(pools.keys())
-    folder_numbers = {key: idx + 1 for idx, key in enumerate(sorted_pool_keys)}
+    
+    # ✅ FIX #3: Extract folder numbers from folder names instead of generating them
+    for key, data in pools.items():
+        folder_name = data["rel_path"].name
+        folder_number = extract_folder_number(folder_name)
+        
+        # If no number found, default to 0
+        if folder_number == 0:
+            print(f"WARNING: No number found in folder name '{folder_name}', using 0")
+        
+        data["folder_number"] = folder_number
     
     for key, data in pools.items():
-        folder_number = folder_numbers[key]
+        folder_number = data["folder_number"]  # ✅ Use extracted number from folder name
         
+        # ✅ FIX #3: Don't add number prefix - folder already has it
         original_rel_path = data["rel_path"]
-        folder_name = original_rel_path.name
-        parent_path = original_rel_path.parent
-        numbered_folder_name = f"{folder_number}-{folder_name}"
-        numbered_rel_path = parent_path / numbered_folder_name
         
-        out_f = bundle_dir / numbered_rel_path
+        out_f = bundle_dir / original_rel_path  # Use folder as-is
         out_f.mkdir(parents=True, exist_ok=True)
         
         # ✅ FIX #3: Copy "always first/last" files unmodified
@@ -276,9 +291,10 @@ def main():
                     print(f"  ✗ Error copying {Path(always_file).name}: {e}")
         
         manifest = [
-            f"MANIFEST FOR FOLDER: {numbered_rel_path}",
+            f"MANIFEST FOR FOLDER: {original_rel_path}",
             "=" * 40,
             f"Total Available Files: {len(data['files'])}",
+            f"Folder Number: {folder_number}",
             "",
             ""
         ]
