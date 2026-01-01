@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.4.2
-- CRITICAL FIX: Aggressive discovery to prevent empty output folders.
-- REMOVED: All pre-action jitter/micro-mouse moves.
+merge_macros.py - v3.4.3
+- BASE: v3.4.2 (User Provided)
+- FIX: Path-Agnostic Discovery. Handles deep nesting (originals/deskt -osrs/...) 
+  ensuring output folders are not empty and Z-variations match correctly.
 - FEATURE: Random micro-delay (0-100ms) per event for timing variance.
 - FEATURE: Idle Mouse Movements for gaps > 5s.
-- LOGGING: Verbose console output for folder discovery.
 """
 
 import argparse, json, random, re, sys, os, math, shutil
@@ -48,7 +48,6 @@ def format_ms_precise(ms: int) -> str:
     return f"{m}m {s}s" if m > 0 else f"{s}s"
 
 def clean_identity(name: str) -> str:
-    # Strips " - Copy", " (1)", etc.
     cleaned = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
     return cleaned if cleaned else name.lower()
 
@@ -158,48 +157,51 @@ def main():
     # 1. Discovery
     for root, dirs, files in os.walk(search_base):
         curr = Path(root)
-        # Skip internal/output folders
         if any(p in curr.parts for p in [".git", ".github", "output", "merged_bundle"]): continue
         
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower() and f != "logout.json"]
         if not jsons: continue
         
-        print(f"Scanning folder: {curr.name} (Found {len(jsons)} macros)")
-        
-        # Determine parent scope (Desktop/Mobile)
+        # Identity logic: Use folder name + Parent scope
         parent_scope = "default"
         for p in curr.parts:
-            if p.lower() in ["desktop", "mobile"]:
+            if p.lower() in ["desktop", "mobile", "deskt -osrs"]:
                 parent_scope = p.lower()
                 break
         
         mid = clean_identity(curr.name)
-        is_z = "z +" in str(curr).lower() or curr.name.lower().startswith("z_")
+        is_z = "z +" in str(curr).lower() or curr.name.lower().startswith("z_") or "zspotfire" in curr.name.lower()
 
         if is_z:
+            print(f"Variation folder found: {curr.name}")
             z_storage.setdefault((parent_scope, mid), []).extend([curr / f for f in jsons])
             for f in jsons: durations_cache[curr / f] = get_file_duration_ms(curr / f)
         else:
-            # We use the relative path as the unique pool key
+            # Key uses relative path to preserve hierarchy in output
             try:
-                rel = curr.relative_to(search_base)
+                rel_path = curr.relative_to(search_base)
             except:
-                rel = Path(curr.name)
+                rel_path = Path(curr.name)
+                
+            key = str(rel_path).lower()
+            print(f"Macro pool found: {key} ({len(jsons)} files)")
             
-            key = str(rel).lower()
-            if key not in pools:
-                file_paths = [curr / f for f in jsons]
-                pools[key] = {
-                    "rel": rel, 
-                    "files": file_paths, 
-                    "is_ts": "time-sens" in key or "timesens" in key, 
-                    "mid": mid, 
-                    "scope": parent_scope,
-                    "num": extract_folder_number(curr.name)
-                }
-                for fp in file_paths: durations_cache[fp] = get_file_duration_ms(fp)
+            pools[key] = {
+                "rel": rel_path, 
+                "files": [curr / f for f in jsons], 
+                "is_ts": "time-sens" in key or "timesens" in key, 
+                "mid": mid, 
+                "scope": parent_scope,
+                "num": extract_folder_number(curr.name)
+            }
+            # Copy assets (images/txt)
+            for f in files:
+                if f.lower().endswith(('.png', '.jpg', '.txt', '.ini')):
+                    durations_cache['assets_' + str(curr / f)] = True # just to flag
 
-    # 2. Inject Z-Variation files into pools
+            for f in jsons: durations_cache[curr / f] = get_file_duration_ms(curr / f)
+
+    # 2. Inject Z-Variation files
     for k, d in pools.items():
         z_files = z_storage.get((d["scope"], d["mid"]), [])
         if z_files:
@@ -211,15 +213,19 @@ def main():
 
     # 3. Execution
     if not pools:
-        print("CRITICAL: No macro pools found! Ensure JSON files are in subfolders.")
+        print("CRITICAL: No macro pools found! Check if JSONs are in 'originals/deskt -osrs/'.")
         return
-
-    print(f"--- PROCESSING {len(pools)} POOLS ---")
 
     for k, data in pools.items():
         out_f = bundle_dir / data["rel"]
         out_f.mkdir(parents=True, exist_ok=True)
         
+        # Mirror non-macro assets
+        src_path = search_base / data["rel"]
+        for item in os.listdir(src_path):
+            if item.lower().endswith(('.png', '.jpg', '.txt', '.ini')):
+                shutil.copy2(src_path / item, out_f / item)
+
         if logout_file: shutil.copy2(logout_file, out_f / "logout.json")
         for af in data["always"]: shutil.copy2(af, out_f / af.name)
 
@@ -230,7 +236,6 @@ def main():
             is_inef = (v_idx > norm_v)
             v_code = f"{chr(64 + v_idx)}{data['num']}"
             
-            # Weighted multiplier logic
             if data["is_ts"]:
                 mult = rng.choice([1.0, 1.2, 1.5])
             else:
@@ -248,9 +253,9 @@ def main():
                 base_t = min(int(e["Time"]) for e in raw)
                 timeline += (int(rng.randint(500, 2500) * mult) if i > 0 else 0)
                 
-                for e_idx, e in enumerate(raw):
+                for e in raw:
                     rel_off = int(int(e["Time"]) - base_t)
-                    # Request: Random interval from 0 to 100ms
+                    # REQUEST: Random micro-delay 0-100ms
                     micro_delay = rng.randint(0, 100)
                     total_micro_delay += micro_delay
                     
@@ -265,12 +270,11 @@ def main():
                 for j in range(split+1, len(merged)): merged[j]["Time"] += p_ms
                 timeline = merged[-1]["Time"]
 
-            # Save file
             prefix = "¬¬¬" if is_inef else ""
             fname = f"{prefix}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
         
-        print(f"Done: {k}")
+        print(f"Finished: {k}")
 
     print(f"Bundle {args.bundle_id} complete.")
 
