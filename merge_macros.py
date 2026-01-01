@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.4.3
-- BASE: v3.4.2 (User Provided)
-- FIX: Path-Agnostic Discovery. Handles deep nesting (originals/deskt -osrs/...) 
-  ensuring output folders are not empty and Z-variations match correctly.
-- FEATURE: Random micro-delay (0-100ms) per event for timing variance.
-- FEATURE: Idle Mouse Movements for gaps > 5s.
+merge_macros.py - v3.4.4
+- FIX: Advanced Discovery for deep 'originals' folders.
+- FIX: Correctly maps relative paths even when starting from root.
+- FEATURE: 0-100ms random micro-delay.
 """
 
 import argparse, json, random, re, sys, os, math, shutil
@@ -42,11 +40,6 @@ def get_file_duration_ms(path: Path) -> int:
         return max(times) - min(times)
     except: return 0
 
-def format_ms_precise(ms: int) -> str:
-    ts = int(round(ms / 1000))
-    m, s = ts // 60, ts % 60
-    return f"{m}m {s}s" if m > 0 else f"{s}s"
-
 def clean_identity(name: str) -> str:
     cleaned = re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
     return cleaned if cleaned else name.lower()
@@ -57,24 +50,18 @@ def extract_folder_number(folder_name: str) -> int:
     return 0
 
 def insert_idle_mouse_movements(events, rng, movement_percentage):
-    if not events or len(events) < 2:
-        return events, 0
-    
+    if not events or len(events) < 2: return events, 0
     result = []
     total_idle_time = 0
-    
     for i in range(len(events)):
         result.append(events[i])
-        
         if i < len(events) - 1:
             curr_t = int(events[i].get("Time", 0))
             next_t = int(events[i + 1].get("Time", 0))
             gap = next_t - curr_t
-            
             if gap >= 5000:
                 active_dur = int(gap * movement_percentage)
                 movement_start = curr_t + ((gap - active_dur) // 2)
-                
                 last_x, last_y = 500, 500 
                 for j in range(i, -1, -1):
                     x_v, y_v = events[j].get("X"), events[j].get("Y")
@@ -83,12 +70,10 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                             last_x, last_y = int(x_v), int(y_v)
                             break
                         except: continue
-                
                 num_moves = max(1, active_dur // 500)
                 for m_idx in range(num_moves):
                     t_ratio = m_idx / num_moves
                     move_time = int(movement_start + (active_dur * t_ratio))
-                    
                     if rng.random() < 0.5:
                         radius = rng.randint(50, 150)
                         angle = t_ratio * math.pi * 2 + rng.uniform(0, math.pi)
@@ -97,7 +82,6 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                     else:
                         new_x = last_x + rng.randint(-100, 100)
                         new_y = last_y + rng.randint(-100, 100)
-                    
                     new_x, new_y = max(100, min(1800, new_x)), max(100, min(1000, new_y))
                     result.append({"Time": move_time, "Type": "MouseMove", "X": new_x, "Y": new_y})
                     last_x, last_y = new_x, new_y
@@ -154,7 +138,6 @@ def main():
     rng = random.Random()
     pools, z_storage, durations_cache = {}, {}, {}
 
-    # 1. Discovery
     for root, dirs, files in os.walk(search_base):
         curr = Path(root)
         if any(p in curr.parts for p in [".git", ".github", "output", "merged_bundle"]): continue
@@ -162,7 +145,6 @@ def main():
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower() and f != "logout.json"]
         if not jsons: continue
         
-        # Identity logic: Use folder name + Parent scope
         parent_scope = "default"
         for p in curr.parts:
             if p.lower() in ["desktop", "mobile", "deskt -osrs"]:
@@ -173,18 +155,18 @@ def main():
         is_z = "z +" in str(curr).lower() or curr.name.lower().startswith("z_") or "zspotfire" in curr.name.lower()
 
         if is_z:
-            print(f"Variation folder found: {curr.name}")
             z_storage.setdefault((parent_scope, mid), []).extend([curr / f for f in jsons])
             for f in jsons: durations_cache[curr / f] = get_file_duration_ms(curr / f)
         else:
-            # Key uses relative path to preserve hierarchy in output
+            # We treat the folder as a macro pool IF it contains JSONs
+            # We want to keep the relative path starting from 'originals' or the root
             try:
                 rel_path = curr.relative_to(search_base)
             except:
                 rel_path = Path(curr.name)
                 
             key = str(rel_path).lower()
-            print(f"Macro pool found: {key} ({len(jsons)} files)")
+            print(f"POOL DETECTED: {key} ({len(jsons)} files)")
             
             pools[key] = {
                 "rel": rel_path, 
@@ -194,37 +176,31 @@ def main():
                 "scope": parent_scope,
                 "num": extract_folder_number(curr.name)
             }
-            # Copy assets (images/txt)
-            for f in files:
-                if f.lower().endswith(('.png', '.jpg', '.txt', '.ini')):
-                    durations_cache['assets_' + str(curr / f)] = True # just to flag
-
             for f in jsons: durations_cache[curr / f] = get_file_duration_ms(curr / f)
 
-    # 2. Inject Z-Variation files
     for k, d in pools.items():
         z_files = z_storage.get((d["scope"], d["mid"]), [])
         if z_files:
             print(f"Injecting {len(z_files)} variation files into {k}")
             d["files"].extend(z_files)
-        
         d["always"] = [f for f in d["files"] if f.name.lower().startswith("always")]
         d["files"] = [f for f in d["files"] if f not in d["always"]]
 
-    # 3. Execution
     if not pools:
-        print("CRITICAL: No macro pools found! Check if JSONs are in 'originals/deskt -osrs/'.")
+        print("CRITICAL: No macro pools found! Printing directory tree for debug:")
+        for root, dirs, files in os.walk(search_base):
+            print(f"  {root} (contains {len(files)} files)")
         return
 
     for k, data in pools.items():
         out_f = bundle_dir / data["rel"]
         out_f.mkdir(parents=True, exist_ok=True)
         
-        # Mirror non-macro assets
         src_path = search_base / data["rel"]
-        for item in os.listdir(src_path):
-            if item.lower().endswith(('.png', '.jpg', '.txt', '.ini')):
-                shutil.copy2(src_path / item, out_f / item)
+        if src_path.exists():
+            for item in os.listdir(src_path):
+                if item.lower().endswith(('.png', '.jpg', '.txt', '.ini')):
+                    shutil.copy2(src_path / item, out_f / item)
 
         if logout_file: shutil.copy2(logout_file, out_f / "logout.json")
         for af in data["always"]: shutil.copy2(af, out_f / af.name)
@@ -235,11 +211,7 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_code = f"{chr(64 + v_idx)}{data['num']}"
-            
-            if data["is_ts"]:
-                mult = rng.choice([1.0, 1.2, 1.5])
-            else:
-                mult = rng.choices([1, 2, 3], weights=[50, 30, 20] if not is_inef else [20, 40, 40])[0]
+            mult = rng.choice([1.0, 1.2, 1.5]) if data["is_ts"] else rng.choices([1, 2, 3], weights=[50, 30, 20] if not is_inef else [20, 40, 40])[0]
             
             paths = QueueFileSelector(rng, data["files"], durations_cache).get_sequence(args.target_minutes, is_inef, data["is_ts"])
             if not paths: continue
@@ -249,16 +221,12 @@ def main():
                 raw = load_json_events(p)
                 if not raw: continue
                 raw, _ = insert_idle_mouse_movements(raw, rng, rng.uniform(0.3, 0.4))
-                
                 base_t = min(int(e["Time"]) for e in raw)
                 timeline += (int(rng.randint(500, 2500) * mult) if i > 0 else 0)
-                
                 for e in raw:
                     rel_off = int(int(e["Time"]) - base_t)
-                    # REQUEST: Random micro-delay 0-100ms
                     micro_delay = rng.randint(0, 100)
                     total_micro_delay += micro_delay
-                    
                     ne = deepcopy(e)
                     ne["Time"] = timeline + rel_off + total_micro_delay
                     merged.append(ne)
@@ -273,9 +241,7 @@ def main():
             prefix = "¬¬¬" if is_inef else ""
             fname = f"{prefix}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
-        
         print(f"Finished: {k}")
-
     print(f"Bundle {args.bundle_id} complete.")
 
 if __name__ == "__main__":
