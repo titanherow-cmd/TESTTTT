@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - STABLE RESTORE POINT (v3.2.2) - SMOOTH MOVEMENTS
+merge_macros.py - STABLE RESTORE POINT (v3.2.3) - SMOOTH TRANSITIONS
+- FEATURE: Smooth transitions back to next recorded position (no teleporting!)
 - FEATURE: Realistic smooth mouse movements with multiple patterns
 - FEATURE: Pre-Action Mouse Jitter. If delay > 100ms, injects a micro-move.
-- FIX: Mouse now flows smoothly instead of teleporting
+- FIX: Mouse now flows smoothly through idle → back to recorded position
 - FIX: Idle mouse movements now SKIP drag sequences (DragStart to DragEnd)
 - FIX: Naming scheme A1, B1, C1... with folder numbering (1-Folder).
 - FIX: Z +100 scoped to parent directory only.
@@ -143,12 +144,8 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
     - Only in gaps >= 5000ms
     - SKIP gaps that are inside drag sequences (DragStart to DragEnd)
     - Use middle 40-50% of gap (25% buffer on each side)
-    - Smooth flowing movements with realistic patterns:
-        * Drift: slow meandering movement
-        * Check corners: quick glance to screen corners/edges
-        * Fidget: small back-and-forth movements
-        * Return: move away then return near original position
-    - Movements every ~300-800ms for natural variation
+    - Smooth flowing movements with realistic patterns
+    - ALWAYS smoothly transition back to next recorded position at the end
     """
     if not events or len(events) < 2:
         return events, 0
@@ -187,8 +184,25 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                         start_y = int(y_val)
                         break
                 
+                # ✅ NEW: Get the NEXT recorded position (where we need to end up)
+                next_x, next_y = start_x, start_y  # Default to staying in place
+                for j in range(i + 1, min(i + 20, len(events))):  # Look ahead max 20 events
+                    x_val = events[j].get("X")
+                    y_val = events[j].get("Y")
+                    if x_val is not None and y_val is not None:
+                        next_x = int(x_val)
+                        next_y = int(y_val)
+                        break
+                
+                # Reserve last 20% of time for smooth transition back
+                transition_duration = int(active_duration * 0.2)
+                pattern_duration = active_duration - transition_duration
+                
                 # Choose a movement pattern
                 pattern = rng.choice(['drift', 'check_corner', 'fidget', 'return'])
+                
+                # Track where we end up after the pattern
+                final_pattern_x, final_pattern_y = start_x, start_y
                 
                 if pattern == 'drift':
                     # Slow meandering - pick a nearby target and drift there
@@ -198,17 +212,19 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                     target_y = max(100, min(1000, target_y))
                     
                     # Generate smooth path
-                    num_steps = max(3, active_duration // 600)  # ~600ms per step
+                    num_steps = max(3, pattern_duration // 600)  # ~600ms per step
                     path = generate_smooth_path(start_x, start_y, target_x, target_y, num_steps, rng)
                     
                     for step_idx, (px, py) in enumerate(path):
-                        step_time = int(movement_start + (active_duration * step_idx / len(path)))
+                        step_time = int(movement_start + (pattern_duration * step_idx / len(path)))
                         result.append({
                             "Time": step_time,
                             "Type": "MouseMove",
                             "X": px,
                             "Y": py
                         })
+                    
+                    final_pattern_x, final_pattern_y = path[-1]
                 
                 elif pattern == 'check_corner':
                     # Quick glance to screen edge/corner then back
@@ -223,7 +239,7 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                     corner_x, corner_y = rng.choice(corner_choices)
                     
                     # Move to corner (first half of time)
-                    half_duration = active_duration // 2
+                    half_duration = pattern_duration // 2
                     num_steps_out = max(2, half_duration // 400)
                     path_out = generate_smooth_path(start_x, start_y, corner_x, corner_y, num_steps_out, rng)
                     
@@ -236,9 +252,9 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                             "Y": py
                         })
                     
-                    # Return near original position (second half)
-                    return_x = start_x + rng.randint(-30, 30)
-                    return_y = start_y + rng.randint(-30, 30)
+                    # Return to somewhere random (second half)
+                    return_x = start_x + rng.randint(-60, 60)
+                    return_y = start_y + rng.randint(-60, 60)
                     return_x = max(100, min(1800, return_x))
                     return_y = max(100, min(1000, return_y))
                     
@@ -253,11 +269,13 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                             "X": px,
                             "Y": py
                         })
+                    
+                    final_pattern_x, final_pattern_y = path_back[-1]
                 
                 elif pattern == 'fidget':
                     # Small nervous movements in a small area
                     num_fidgets = rng.randint(4, 8)
-                    fidget_interval = active_duration // num_fidgets
+                    fidget_interval = pattern_duration // num_fidgets
                     
                     current_x, current_y = start_x, start_y
                     
@@ -283,6 +301,8 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                             })
                         
                         current_x, current_y = new_x, new_y
+                    
+                    final_pattern_x, final_pattern_y = current_x, current_y
                 
                 elif pattern == 'return':
                     # Move somewhere then return to almost exactly where we were
@@ -292,7 +312,7 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                     away_y = max(100, min(1000, away_y))
                     
                     # Move away (60% of time)
-                    away_duration = int(active_duration * 0.6)
+                    away_duration = int(pattern_duration * 0.6)
                     num_steps_away = max(3, away_duration // 500)
                     path_away = generate_smooth_path(start_x, start_y, away_x, away_y, num_steps_away, rng)
                     
@@ -305,15 +325,15 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                             "Y": py
                         })
                     
-                    # Return to original (40% of time)
-                    return_duration = active_duration - away_duration
-                    final_x = start_x + rng.randint(-5, 5)  # Nearly exact return
-                    final_y = start_y + rng.randint(-5, 5)
-                    final_x = max(100, min(1800, final_x))
-                    final_y = max(100, min(1000, final_y))
+                    # Return near original (40% of time)
+                    return_duration = pattern_duration - away_duration
+                    return_x = start_x + rng.randint(-20, 20)
+                    return_y = start_y + rng.randint(-20, 20)
+                    return_x = max(100, min(1800, return_x))
+                    return_y = max(100, min(1000, return_y))
                     
                     num_steps_return = max(2, return_duration // 500)
-                    path_return = generate_smooth_path(away_x, away_y, final_x, final_y, num_steps_return, rng)
+                    path_return = generate_smooth_path(away_x, away_y, return_x, return_y, num_steps_return, rng)
                     
                     for step_idx, (px, py) in enumerate(path_return):
                         step_time = int(movement_start + away_duration + (return_duration * step_idx / len(path_return)))
@@ -323,6 +343,27 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                             "X": px,
                             "Y": py
                         })
+                    
+                    final_pattern_x, final_pattern_y = path_return[-1]
+                
+                # ✅ NEW: Smooth transition back to next recorded position
+                # Use the last 20% of time to smoothly drift to where the next event expects us
+                num_transition_steps = max(2, transition_duration // 400)
+                transition_path = generate_smooth_path(
+                    final_pattern_x, final_pattern_y, 
+                    next_x, next_y, 
+                    num_transition_steps, 
+                    rng
+                )
+                
+                for step_idx, (px, py) in enumerate(transition_path):
+                    step_time = int(movement_start + pattern_duration + (transition_duration * step_idx / len(transition_path)))
+                    result.append({
+                        "Time": step_time,
+                        "Type": "MouseMove",
+                        "X": px,
+                        "Y": py
+                    })
                 
                 total_idle_time += active_duration
     
