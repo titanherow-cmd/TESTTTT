@@ -388,7 +388,7 @@ def main():
             manifest_entry.append("-" * 30)
             manifest.append("\n".join(manifest_entry))
 
-        (out_f / f"!_MANIFEST_{folder_number}_!").write_text("\n".join(manifest))
+        (out_f / f"!_MANIFEST_{folder_number}_!.txt").write_text("\n".join(manifest))
 
 if __name__ == "__main__":
     main()
