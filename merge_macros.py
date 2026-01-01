@@ -72,7 +72,7 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
     - Movements every ~500ms during active window
     """
     if not events or len(events) < 2:
-        return events
+        return events, 0
     
     result = []
     total_idle_time = 0
@@ -95,9 +95,13 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                 movement_start = current_time + buffer_start
                 movement_end = movement_start + active_duration
                 
-                # Get last known position (if available)
-                last_x = events[i].get("X", 500)
-                last_y = events[i].get("Y", 500)
+                # Get last known mouse position by searching backwards
+                last_x, last_y = 500, 500  # Default fallback
+                for j in range(i, -1, -1):
+                    if "X" in events[j] and "Y" in events[j]:
+                        last_x = events[j]["X"]
+                        last_y = events[j]["Y"]
+                        break
                 
                 # Generate smooth movements every ~500ms
                 num_moves = max(1, active_duration // 500)
