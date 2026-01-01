@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.4.1
-- FIX: Improved folder discovery to prevent empty output folders.
-- FIX: Resolved TypeError in mouse movement calculation.
+merge_macros.py - v3.4.2
+- CRITICAL FIX: Aggressive discovery to prevent empty output folders.
 - REMOVED: All pre-action jitter/micro-mouse moves.
 - FEATURE: Random micro-delay (0-100ms) per event for timing variance.
 - FEATURE: Idle Mouse Movements for gaps > 5s.
+- LOGGING: Verbose console output for folder discovery.
 """
 
 import argparse, json, random, re, sys, os, math, shutil
@@ -76,7 +76,6 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
                 active_dur = int(gap * movement_percentage)
                 movement_start = curr_t + ((gap - active_dur) // 2)
                 
-                # Sanitize coordinates
                 last_x, last_y = 500, 500 
                 for j in range(i, -1, -1):
                     x_v, y_v = events[j].get("X"), events[j].get("Y")
@@ -144,20 +143,12 @@ def main():
     args = parser.parse_args()
 
     search_base = Path(args.input_root).resolve()
-    # Try to find originals folder, otherwise use search_base
-    originals_root = search_base
-    for d in ["originals", "input_macros", "macros"]:
-        if (search_base / d).exists():
-            originals_root = search_base / d
-            break
-    
-    print(f"Scanning source: {originals_root}")
+    print(f"--- STARTING MACRO DISCOVERY AT: {search_base} ---")
 
     logout_file = None
-    for loc in [search_base / "logout.json", originals_root / "logout.json"]:
-        if loc.exists():
-            logout_file = loc
-            break
+    if (search_base / "logout.json").exists():
+        logout_file = search_base / "logout.json"
+        print("Found global logout.json")
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -165,41 +156,65 @@ def main():
     pools, z_storage, durations_cache = {}, {}, {}
 
     # 1. Discovery
-    for root, dirs, files in os.walk(originals_root):
+    for root, dirs, files in os.walk(search_base):
         curr = Path(root)
-        if any(p in curr.parts for p in [".git", ".github", "output"]): continue
+        # Skip internal/output folders
+        if any(p in curr.parts for p in [".git", ".github", "output", "merged_bundle"]): continue
         
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower() and f != "logout.json"]
         if not jsons: continue
         
-        is_z = "z +" in str(curr).lower() or curr.name.lower().startswith("z_")
-        parent_scope = next((p for p in curr.parts if p.lower() in ["desktop", "mobile"]), "default")
+        print(f"Scanning folder: {curr.name} (Found {len(jsons)} macros)")
+        
+        # Determine parent scope (Desktop/Mobile)
+        parent_scope = "default"
+        for p in curr.parts:
+            if p.lower() in ["desktop", "mobile"]:
+                parent_scope = p.lower()
+                break
+        
         mid = clean_identity(curr.name)
+        is_z = "z +" in str(curr).lower() or curr.name.lower().startswith("z_")
 
         if is_z:
             z_storage.setdefault((parent_scope, mid), []).extend([curr / f for f in jsons])
             for f in jsons: durations_cache[curr / f] = get_file_duration_ms(curr / f)
         else:
-            rel = curr.relative_to(originals_root)
+            # We use the relative path as the unique pool key
+            try:
+                rel = curr.relative_to(search_base)
+            except:
+                rel = Path(curr.name)
+            
             key = str(rel).lower()
             if key not in pools:
                 file_paths = [curr / f for f in jsons]
-                pools[key] = {"rel": rel, "files": file_paths, "is_ts": "time-sens" in key or "timesens" in key, "mid": mid, "scope": parent_scope}
+                pools[key] = {
+                    "rel": rel, 
+                    "files": file_paths, 
+                    "is_ts": "time-sens" in key or "timesens" in key, 
+                    "mid": mid, 
+                    "scope": parent_scope,
+                    "num": extract_folder_number(curr.name)
+                }
                 for fp in file_paths: durations_cache[fp] = get_file_duration_ms(fp)
 
-    # 2. Merging Pools
+    # 2. Inject Z-Variation files into pools
     for k, d in pools.items():
         z_files = z_storage.get((d["scope"], d["mid"]), [])
-        d["files"].extend(z_files)
+        if z_files:
+            print(f"Injecting {len(z_files)} variation files into {k}")
+            d["files"].extend(z_files)
+        
         d["always"] = [f for f in d["files"] if f.name.lower().startswith("always")]
         d["files"] = [f for f in d["files"] if f not in d["always"]]
-        d["num"] = extract_folder_number(d["rel"].name)
-        print(f"Pool '{k}': Found {len(d['files'])} files.")
 
     # 3. Execution
     if not pools:
-        print("CRITICAL: No macro pools found. Check folder names and JSON locations.")
+        print("CRITICAL: No macro pools found! Ensure JSON files are in subfolders.")
         return
+
+    print(f"--- PROCESSING {len(pools)} POOLS ---")
 
     for k, data in pools.items():
         out_f = bundle_dir / data["rel"]
@@ -214,7 +229,12 @@ def main():
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_code = f"{chr(64 + v_idx)}{data['num']}"
-            mult = rng.choice([1.0, 1.2, 1.5]) if data["is_ts"] else (rng.choices([1, 2, 3], weights=[50, 30, 20] if not is_inef else [20, 40, 40])[0])
+            
+            # Weighted multiplier logic
+            if data["is_ts"]:
+                mult = rng.choice([1.0, 1.2, 1.5])
+            else:
+                mult = rng.choices([1, 2, 3], weights=[50, 30, 20] if not is_inef else [20, 40, 40])[0]
             
             paths = QueueFileSelector(rng, data["files"], durations_cache).get_sequence(args.target_minutes, is_inef, data["is_ts"])
             if not paths: continue
@@ -228,9 +248,10 @@ def main():
                 base_t = min(int(e["Time"]) for e in raw)
                 timeline += (int(rng.randint(500, 2500) * mult) if i > 0 else 0)
                 
-                for e in raw:
+                for e_idx, e in enumerate(raw):
                     rel_off = int(int(e["Time"]) - base_t)
-                    micro_delay = rng.randint(0, args.delay_before_action_ms)
+                    # Request: Random interval from 0 to 100ms
+                    micro_delay = rng.randint(0, 100)
                     total_micro_delay += micro_delay
                     
                     ne = deepcopy(e)
@@ -244,10 +265,14 @@ def main():
                 for j in range(split+1, len(merged)): merged[j]["Time"] += p_ms
                 timeline = merged[-1]["Time"]
 
-            fname = f"{'¬¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            # Save file
+            prefix = "¬¬¬" if is_inef else ""
+            fname = f"{prefix}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
+        
+        print(f"Done: {k}")
 
-    print(f"Successfully processed {len(pools)} folders.")
+    print(f"Bundle {args.bundle_id} complete.")
 
 if __name__ == "__main__":
     main()
