@@ -1,272 +1,1090 @@
-# v3.5.1 CRITICAL BUGFIX - File Selection
-
-## 🔥 Bug Discovered
-
-**Date**: January 30, 2026  
-**Version**: v3.5.1  
-**Severity**: CRITICAL  
-**Impact**: Files were 10-20x longer than requested target duration
-
----
-
-## 🐛 The Bug
-
-### Symptom:
-User requested 35-minute merged file, got 838-minute file (13.9 hours!)
-
-### Analysis:
-File `11_A_838m.json`:
-- **Total duration**: 838.3 minutes (14 hours!)
-- **Files merged**: 14,251 files (should be ~400-500)
-- **Actual content**: 116.9 minutes
-- **Pause time**: 721.4 minutes (86% of total!)
-  - Inter-file gaps: 603.6 minutes
-  - Intra-file pauses: 354.7 minutes
-
-### Root Cause:
-`QueueFileSelector.get_sequence()` at line 727 only calculated:
-```python
-cur_ms += (file_duration + 1500)
-```
-
-This ONLY accounted for:
-- Original file duration
-- 1500ms inter-file gap
-
-It DID NOT account for:
-- **Intra-file pauses**: 3.5-6.5s, 55% chance every ~5 actions
-- **Idle mouse movements**: 40-50% of gaps >= 5 seconds  
-- **Pre-click jitter**: 100-200ms (negligible but adds up)
-- **Higher inter-file gaps**: Now 1-3s with multipliers up to 3x
-
-**Result**: The selector kept adding files thinking it hadn't reached the target yet!
-
----
-
-## ✅ The Fix
-
-### Changes in v3.5.1:
-
-**Line 727-740** - Updated time estimation:
-
-```python
-# OLD (BUGGY):
-cur_ms += (self.durations.get(pick, 2000) + 1500)
-
-# NEW (FIXED):
-file_duration = self.durations.get(pick, 2000)
-estimated_time = file_duration
-
-# 1. Original file duration
-estimated_time = file_duration
-
-# 2. Inter-file gap (1-3s with multipliers)
-estimated_time += 2000 * 2  # Conservative: 2s × avg multiplier 2x
-
-# 3. Intra-file pauses (adds ~20% to duration)
-estimated_time += file_duration * 0.20
-
-# 4. Idle movements (adds ~10% to duration)
-estimated_time += file_duration * 0.10
-
-# 5. Pre-click jitter (negligible, ignored)
-
-cur_ms += estimated_time
-```
-
-**Line 746** - Added additional safety limit:
-```python
-if cur_ms > target_ms * 5: break  # Never exceed 5x target
-```
-
----
-
-## 📊 Before vs After
-
-### OLD METHOD (BUGGY):
-```
-Target: 35 minutes
-Estimated time per file: 2,000ms (500ms file + 1,500ms gap)
-Files selected: 1,050
-Actual result: 838 minutes (14 hours!) ❌
-```
-
-### NEW METHOD (FIXED):
-```
-Target: 35 minutes
-Estimated time per file: 4,650ms (accounts for all pauses)
-Files selected: ~451
-Expected result: 35-42 minutes ✅
-```
-
-**Improvement**: 57% fewer files selected, accurate duration!
-
----
-
-## 🔬 Technical Details
-
-### Time Addition Factors:
-
-| Factor | Old Estimate | New Estimate | Impact |
-|--------|-------------|--------------|--------|
-| File duration | ✅ 500ms | ✅ 500ms | Baseline |
-| Inter-file gap | ✅ 1,500ms | ✅ 4,000ms | 2.7x more |
-| Intra-file pauses | ❌ Not counted | ✅ +100ms | NEW |
-| Idle movements | ❌ Not counted | ✅ +50ms | NEW |
-| Pre-click jitter | ❌ Not counted | ⚠️ Negligible | Ignored |
-| **TOTAL** | **2,000ms** | **4,650ms** | **2.3x more accurate** |
-
-### Why Conservative Estimates:
-
-The new calculation uses **conservative (higher) estimates** to ensure we don't overshoot:
-
-1. **Inter-file gap**: Average 2s × multiplier 2x = 4s
-   - Actual range: 1-3s × 1-3x multiplier
-   - Conservative estimate prevents overshooting
-
-2. **Intra-file pauses**: +20% of file duration
-   - Actual: 55% chance, every 3-7 actions, 3.5-6.5s each
-   - 20% is a reasonable average across many files
-
-3. **Idle movements**: +10% of file duration
-   - Actual: 40-50% of gaps >= 5s
-   - 10% accounts for typical gap distribution
-
----
-
-## ✅ Verification
-
-### Test Results:
-
-```python
-Target: 35 minutes (2,100,000ms)
-Average file: 500ms
-
-OLD: 1,050 files selected → 838 minutes actual ❌
-NEW: 451 files selected → ~35-42 minutes expected ✅
-
-Improvement: 57% reduction in files, accurate duration!
-```
-
-### Safety Limits:
-
-1. **File count limit**: `if len(seq) > 1000: break`
-   - Prevents more than 1,000 files being selected
-   
-2. **Duration limit**: `if cur_ms > target_ms * 5: break`
-   - NEW in v3.5.1
-   - Prevents exceeding 5x the target duration
-   - Safety net for edge cases
-
----
-
-## 🎯 What This Fixes
-
-### Before (v3.5.0 and earlier):
-- ❌ 35-minute target → 838-minute result (24x over!)
-- ❌ Merged 14,251 files (30x too many!)
-- ❌ 86% of file was pause time
-- ❌ Completely unusable for intended purpose
-
-### After (v3.5.1):
-- ✅ 35-minute target → 35-42 minute result (accurate!)
-- ✅ Merges ~400-500 files (reasonable)
-- ✅ ~40-50% pause time (expected)
-- ✅ Works as intended
-
----
-
-## 📝 Usage Notes
-
-### No Changes Required:
-The fix is automatic - same command line usage:
-
-```bash
-python3 merge_macros.py \
-  --versions 3 \
-  --target-minutes 35 \
-  --bundle-id my_bundle \
-  input/ output/
-```
-
-### What You'll Notice:
-1. **Correct durations**: Files will match your target (±20%)
-2. **Faster processing**: Fewer files = faster merging
-3. **Reasonable file counts**: Expect 400-600 files for 35min target
-4. **Accurate manifests**: Durations in manifest will be correct
-
----
-
-## 🔄 Backward Compatibility
-
-### Old Files:
-- Files created with v3.5.0 or earlier may be extremely long
-- You can identify them by the duration in filename (e.g., `11_A_838m.json`)
-- These files are still valid, just longer than intended
-
-### Recommendation:
-- **Re-generate** all merged files with v3.5.1 to get correct durations
-- Old files will work but are not optimal
-
----
-
-## 🚨 Important Notes
-
-### Why This Wasn't Caught Earlier:
-
-1. **Safety limit existed** (`len(seq) > 1000`) but was too high
-2. **No duration-based safety** until v3.5.1
-3. **Gradual accumulation** made it hard to spot during testing
-4. **New features** (intra-pauses, idle movements) added significant time
-
-### Why It's Critical:
-
-This bug made the script nearly unusable:
-- 35-minute request → 14-hour result
-- Completely defeats the purpose of targeted duration
-- Waste of processing time and disk space
-
----
-
-## ✅ Resolution
-
-**Status**: FIXED in v3.5.1  
-**Testing**: Verified with calculations and logic review  
-**Deployment**: Ready for immediate use  
-
-All users should upgrade to v3.5.1 and regenerate their merged files.
-
----
-
-## 📞 Technical Support
-
-### If You Still Get Long Files:
-
-1. **Check version**: Ensure you're using v3.5.1 (check script header)
-2. **Check command**: Verify `--target-minutes` parameter
-3. **Check files**: Ensure input files are reasonable duration
-4. **Report**: If issue persists, provide:
-   - Command used
-   - File count in input folder
-   - Average input file duration
-   - Output file duration
-
-### Expected Ranges:
-
-For a 35-minute target:
-- **Files merged**: 300-600 files
-- **Output duration**: 35-45 minutes
-- **File count in name**: `XX_Y_35m.json` to `XX_Y_45m.json`
-
-Anything outside these ranges indicates a problem.
-
----
-
-**v3.5.1 Changelog**:
-- ✅ Fixed QueueFileSelector duration calculation
-- ✅ Added conservative estimates for all pause types
-- ✅ Added 5x duration safety limit
-- ✅ Updated version and documentation
-- ✅ Backward compatible (no breaking changes)
-
-🎉 **Bug eliminated - script now works as intended!**
+#!/usr/bin/env python3
+"""
+merge_macros.py - v3.5.1 - CRITICAL BUGFIX: File Selection
+- FIX: QueueFileSelector now accurately estimates total duration
+- FIX: Accounts for intra-file pauses, idle movements, and inter-file gaps
+- FIX: Additional safety limit (5x target) to prevent runaway file selection
+- PREVIOUS: v3.5.0 - Pre-click jitter & OSRS chat messages
+- FEATURE: Pre-click jitter (45% chance before clicks, ±1-3px with snap back)
+- FEATURE: OSRS chat messages (5% chance per file, 106 realistic phrases)
+- FEATURE: Human-like mouse movements with variable speeds (0-2500+ px/s)
+- FEATURE: Intra-file pauses (3.5-6.5s, 55% chance every ~5 actions)
+- FEATURE: Inter-file gaps (1-3s, non-rounded, variable multipliers)
+- FEATURE: Massive pause for inefficient versions (5-12 minutes)
+"""
+
+import argparse, json, random, re, sys, os, math, shutil
+from pathlib import Path
+
+# OSRS chat messages for realism (106 common phrases)
+OSRS_CHAT_MESSAGES = [
+    # Levels/Stats
+    "what lvl fishing?", "whats ur mining lvl", "combat lvl?", "stats?", 
+    "total level?", "how long for 99?", "what cb lvl?", "ur cooking level?",
+    # Quests
+    "doing rfd?", "finished ds2 yet?", "what quest u doing", "need quest help?",
+    "sote done?", "got qpc?", "how many qp", "best quest for xp?",
+    # Skilling
+    "afk spot?", "good money maker?", "where u training?", "fastest route to 99?",
+    "how much gp/hr", "efficient?", "worth it?", "better than mlm?",
+    # Items/Gear
+    "price check?", "how much is fury", "cheaper alternative?", "worth upgrading?",
+    "bis for this?", "which spec weapon", "good for training?", "sell or keep?",
+    # PvM
+    "solo or team?", "kc?", "got pet yet?", "drop rate?",
+    "doing slayer?", "which boss?", "task?", "good master?",
+    # General
+    "bank standing lol", "skilling or pvm?", "members worth it?", "f2p or p2p",
+    "main or iron?", "hcim btw", "on mobile rn", "lagging?",
+    # Resources/Location
+    "crowded?", "this world busy", "hop?", "better spot?",
+    "empty world?", "where is this", "how to get there", "tele?",
+    # Achievement/Progress
+    "just got 99", "first time here", "learning this boss", "finally completed",
+    "took forever", "bad rng", "got lucky", "spooned lol",
+    # Advice/Help
+    "any tips?", "recommended setup?", "should i boost?", "worth the grind?",
+    "how long did it take", "hard or easy?", "beginners guide?", "efficient method?",
+    # Social/Banter
+    "nice", "gz", "gratz", "gl", "same", "lol", "ty", "np", "gn", "afk rn",
+    # Economy
+    "ge price?", "merching?", "crashed?", "manipulation?",
+    "buy limit?", "flipping?", "good investment?", "lost bank lol",
+    # Updates/Meta
+    "new update good?", "nerfed?", "buffed?", "meta now?",
+    "still viable?", "changed?", "poll passed?", "when update",
+    # Miscellaneous
+    "dc'd", "server lag?", "game froze", "connection lost",
+    "brb", "switching worlds", "crashed", "my bad"
+]
+
+def load_json_events(path: Path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        events = []
+        if isinstance(data, dict):
+            found_list = None
+            for k in ("events", "items", "entries", "records"):
+                if k in data and isinstance(data[k], list):
+                    found_list = data[k]
+                    break
+            events = found_list if found_list is not None else ([data] if "Time" in data else [])
+        elif isinstance(data, list):
+            events = data
+        
+        cleaned = []
+        for e in events:
+            if isinstance(e, list) and len(e) > 0: e = e[0]
+            if isinstance(e, dict) and "Time" in e: cleaned.append(e)
+        return cleaned
+    except Exception:
+        return []
+
+def get_file_duration_ms(path: Path) -> int:
+    events = load_json_events(path)
+    if not events: return 0
+    try:
+        times = [int(e.get("Time", 0)) for e in events]
+        return max(times) - min(times)
+    except: return 0
+
+def format_ms_precise(ms: int) -> str:
+    ts = int(round(ms / 1000))
+    m, s = ts // 60, ts % 60
+    return f"{m}m {s}s" if m > 0 else f"{s}s"
+
+def clean_identity(name: str) -> str:
+    return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
+
+def extract_folder_number(folder_name: str) -> int:
+    """
+    Extract number from folder name like '1-Mining' or '23-Fishing'.
+    Returns the number, or 0 if not found.
+    """
+    match = re.match(r'^(\d+)-', folder_name)
+    if match:
+        return int(match.group(1))
+    return 0
+
+def is_always_first_or_last_file(filename: str) -> bool:
+    """
+    Check if a file should be treated as "always first" or "always last".
+    Checks if these phrases appear ANYWHERE in the filename (case-insensitive).
+    """
+    filename_lower = filename.lower()
+    patterns = ["always first", "always last", "alwaysfirst", "alwayslast"]
+    return any(pattern in filename_lower for pattern in patterns)
+
+def is_in_drag_sequence(events, index):
+    """
+    Check if the given index is inside a drag sequence (between DragStart and DragEnd).
+    Returns True if we're in the middle of a drag.
+    """
+    drag_started = False
+    for j in range(index, -1, -1):
+        event_type = events[j].get("Type", "")
+        if event_type == "DragEnd":
+            return False
+        elif event_type == "DragStart":
+            drag_started = True
+            break
+    
+    if not drag_started:
+        return False
+    
+    for j in range(index + 1, len(events)):
+        event_type = events[j].get("Type", "")
+        if event_type == "DragEnd":
+            return True
+        elif event_type == "DragStart":
+            return False
+    
+    return False
+
+def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
+    """
+    Generate a human-like path with variable speed, wobbles, and imperfections.
+    
+    Returns: List of (time_ms, x, y) tuples with realistic timing and positions.
+    """
+    if duration_ms < 100:
+        return [(0, end_x, end_y)]
+    
+    path = []
+    
+    # Calculate distance
+    dx = end_x - start_x
+    dy = end_y - start_y
+    distance = math.sqrt(dx**2 + dy**2)
+    
+    if distance < 5:
+        return [(0, end_x, end_y)]
+    
+    # Determine speed profile (variable speeds make it human)
+    speed_profile = rng.choice(['fast_start', 'slow_start', 'medium', 'hesitant'])
+    
+    # Number of steps based on distance and duration
+    num_steps = max(3, min(int(distance / 15), int(duration_ms / 50)))
+    
+    # Add control points for curve (not perfect bezier)
+    num_control = rng.randint(1, 3)
+    control_points = []
+    for _ in range(num_control):
+        # Offset perpendicular to main direction
+        offset = rng.uniform(-0.3, 0.3) * distance
+        t = rng.uniform(0.2, 0.8)
+        ctrl_x = start_x + dx * t + (-dy / (distance + 1)) * offset
+        ctrl_y = start_y + dy * t + (dx / (distance + 1)) * offset
+        control_points.append((ctrl_x, ctrl_y, t))
+    
+    control_points.sort(key=lambda p: p[2])  # Sort by t position
+    
+    current_time = 0
+    
+    for step in range(num_steps + 1):
+        # Non-linear time progression based on speed profile
+        t_raw = step / num_steps
+        
+        if speed_profile == 'fast_start':
+            # Fast at start, slow at end
+            t = 1 - (1 - t_raw) ** 2
+        elif speed_profile == 'slow_start':
+            # Slow at start, fast at end
+            t = t_raw ** 2
+        elif speed_profile == 'hesitant':
+            # Slow-fast-slow with micro-pauses
+            t = 0.5 * (1 - math.cos(t_raw * math.pi))
+        else:  # medium
+            # Slight ease in/out
+            t = 0.5 * (1 - math.cos(t_raw * math.pi))
+        
+        # Calculate position using control points (imperfect curve)
+        if not control_points:
+            # Simple interpolation with wobble
+            x = start_x + dx * t
+            y = start_y + dy * t
+        else:
+            # Multi-segment curve through control points
+            x, y = start_x, start_y
+            for i, (ctrl_x, ctrl_y, ctrl_t) in enumerate(control_points):
+                if t <= ctrl_t:
+                    segment_t = t / ctrl_t if ctrl_t > 0 else 0
+                    x = start_x + (ctrl_x - start_x) * segment_t
+                    y = start_y + (ctrl_y - start_y) * segment_t
+                    break
+                else:
+                    if i == len(control_points) - 1:
+                        # Last segment
+                        segment_t = (t - ctrl_t) / (1 - ctrl_t) if (1 - ctrl_t) > 0 else 0
+                        x = ctrl_x + (end_x - ctrl_x) * segment_t
+                        y = ctrl_y + (end_y - ctrl_y) * segment_t
+                    else:
+                        start_x, start_y = ctrl_x, ctrl_y
+        
+        # Add random wobble (humans don't move in perfect lines)
+        wobble_amount = rng.uniform(1, 5) if step > 0 and step < num_steps else 0
+        x += rng.uniform(-wobble_amount, wobble_amount)
+        y += rng.uniform(-wobble_amount, wobble_amount)
+        
+        # Add occasional micro-corrections (overshoot and correct)
+        if step > 0 and step < num_steps and rng.random() < 0.15:
+            overshoot = rng.uniform(5, 15)
+            direction = 1 if rng.random() < 0.5 else -1
+            x += direction * overshoot * (dx / (distance + 1))
+            y += direction * overshoot * (dy / (distance + 1))
+        
+        # Keep within bounds
+        x = max(100, min(1800, int(x)))
+        y = max(100, min(1000, int(y)))
+        
+        # Calculate time with variable speed
+        time_progress = t
+        
+        # Add micro-pauses (humans sometimes pause mid-movement)
+        if step > 0 and step < num_steps and rng.random() < 0.1:
+            pause = rng.randint(30, 100)
+            current_time += pause
+        
+        step_time = int(time_progress * duration_ms)
+        current_time = max(current_time, step_time)  # Ensure monotonic
+        
+        path.append((current_time, x, y))
+    
+    return path
+
+def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
+    """
+    Add realistic pre-click jitter: before 45% of clicks, add 2-3 micro-movements
+    around the target (±1-3px), then snap back to exact click position.
+    This simulates human hesitation and aiming before clicking.
+    Returns (events_with_jitter, jitter_count).
+    """
+    if not events or len(events) < 2:
+        return events, 0
+    
+    jitter_count = 0
+    i = 0
+    
+    while i < len(events):
+        event = events[i]
+        event_type = event.get('Type', '')
+        
+        # Only apply to Click and RightDown events
+        if event_type in ('Click', 'RightDown'):
+            # 45% chance to add pre-click jitter
+            if rng.random() < 0.45:
+                click_x = event.get('X')
+                click_y = event.get('Y')
+                click_time = event.get('Time')
+                
+                # Need valid coordinates and time
+                if click_x is not None and click_y is not None and click_time is not None:
+                    # Generate 2-3 jitter movements
+                    num_jitters = rng.randint(2, 3)
+                    jitter_events = []
+                    
+                    # Time budget: 100-200ms total for jitter sequence
+                    time_budget = rng.randint(100, 200)
+                    time_per_jitter = time_budget // (num_jitters + 1)  # +1 for final snap back
+                    
+                    current_time = click_time - time_budget
+                    
+                    for j in range(num_jitters):
+                        # Random offset ±1-3 pixels
+                        offset_x = rng.randint(-3, 3)
+                        offset_y = rng.randint(-3, 3)
+                        
+                        jitter_x = int(click_x) + offset_x
+                        jitter_y = int(click_y) + offset_y
+                        
+                        # Keep within reasonable bounds
+                        jitter_x = max(100, min(1800, jitter_x))
+                        jitter_y = max(100, min(1000, jitter_y))
+                        
+                        jitter_events.append({
+                            'Type': 'MouseMove',
+                            'Time': current_time,
+                            'X': jitter_x,
+                            'Y': jitter_y
+                        })
+                        
+                        current_time += time_per_jitter
+                    
+                    # Final movement: snap back to EXACT click position
+                    jitter_events.append({
+                        'Type': 'MouseMove',
+                        'Time': current_time,
+                        'X': int(click_x),
+                        'Y': int(click_y)
+                    })
+                    
+                    # Insert jitter events BEFORE the click
+                    for idx, jitter_event in enumerate(jitter_events):
+                        events.insert(i + idx, jitter_event)
+                    
+                    # Adjust loop index to skip inserted events
+                    i += len(jitter_events)
+                    jitter_count += 1
+        
+        i += 1
+    
+    return events, jitter_count
+
+def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
+    """
+    5% chance to insert a random OSRS chat message at the start of the merged file.
+    Simulates typing a common phrase, adding realism to long sessions.
+    Returns (events_with_chat, chat_inserted).
+    """
+    if not events or rng.random() > 0.05:  # 5% chance
+        return events, False
+    
+    # Pick random message
+    message = rng.choice(OSRS_CHAT_MESSAGES)
+    
+    # Start time - add a small delay before the first recorded event
+    start_time = events[0].get('Time', 0) - rng.randint(500, 2000)
+    current_time = start_time
+    
+    chat_events = []
+    
+    # Open chat with Enter key
+    chat_events.append({
+        'Type': 'KeyDown',
+        'Time': current_time,
+        'KeyCode': 13  # Enter key
+    })
+    current_time += rng.randint(20, 50)
+    
+    chat_events.append({
+        'Type': 'KeyUp',
+        'Time': current_time,
+        'KeyCode': 13
+    })
+    current_time += rng.randint(50, 150)
+    
+    # Type each character with realistic delays
+    for char in message:
+        # Get key code (simplified - lowercase letters and common chars)
+        key_code = ord(char)
+        
+        # KeyDown
+        chat_events.append({
+            'Type': 'KeyDown',
+            'Time': current_time,
+            'KeyCode': key_code
+        })
+        current_time += rng.randint(20, 60)  # Key press duration
+        
+        # KeyUp
+        chat_events.append({
+            'Type': 'KeyUp',
+            'Time': current_time,
+            'KeyCode': key_code
+        })
+        
+        # Delay before next character (50-200ms, realistic typing)
+        current_time += rng.randint(50, 200)
+    
+    # Send message with Enter key
+    current_time += rng.randint(100, 300)  # Brief pause before sending
+    
+    chat_events.append({
+        'Type': 'KeyDown',
+        'Time': current_time,
+        'KeyCode': 13
+    })
+    current_time += rng.randint(20, 50)
+    
+    chat_events.append({
+        'Type': 'KeyUp',
+        'Time': current_time,
+        'KeyCode': 13
+    })
+    
+    # Add small delay after sending
+    final_delay = rng.randint(200, 500)
+    
+    # Shift all original events forward by the total chat duration
+    total_chat_duration = (current_time - start_time) + final_delay
+    for event in events:
+        event['Time'] = int(event['Time']) + total_chat_duration
+    
+    # Insert chat events at the beginning
+    return chat_events + events, True
+
+def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
+    """
+    Insert random pauses between recorded actions within a file.
+    Before every ~5 actions, 55% chance to insert a 3500-6500ms pause.
+    Uses non-rounded values for natural timing.
+    Returns (events_with_pauses, total_pause_time).
+    """
+    if not events or len(events) < 2:
+        return events, 0
+    
+    total_pause_added = 0
+    action_counter = 0
+    i = 0
+    
+    while i < len(events):
+        action_counter += 1
+        
+        # Every 3-7 actions (random), check if we should insert pause
+        if action_counter >= rng.randint(3, 7) and i < len(events) - 1:
+            # 55% chance to insert pause
+            if rng.random() < 0.55:
+                # Generate non-rounded pause duration (3500-6500ms)
+                # Use floats then convert to avoid round numbers
+                pause_duration = int(rng.uniform(3500.123, 6499.987))
+                total_pause_added += pause_duration
+                
+                # Shift all subsequent events by this pause
+                for j in range(i + 1, len(events)):
+                    events[j]["Time"] = int(events[j]["Time"]) + pause_duration
+                
+                action_counter = 0  # Reset counter
+        
+        i += 1
+    
+    return events, total_pause_added
+
+def insert_idle_mouse_movements(events, rng, movement_percentage):
+    """
+    Insert realistic human-like mouse movements during idle periods (gaps > 5 seconds).
+    
+    Movements have:
+    - Variable speeds (fast bursts, slow drifts, hesitations)
+    - Imperfect paths (wobbles, overshoots, corrections)
+    - Natural patterns (wandering, checking, fidgeting)
+    - Smooth transition back to next recorded position
+    """
+    if not events or len(events) < 2:
+        return events, 0
+    
+    result = []
+    total_idle_time = 0
+    
+    for i in range(len(events)):
+        result.append(events[i])
+        
+        # Check gap to next event
+        if i < len(events) - 1:
+            current_time = int(events[i].get("Time", 0))
+            next_time = int(events[i + 1].get("Time", 0))
+            gap = next_time - current_time
+            
+            # Only process gaps >= 5 seconds
+            if gap >= 5000:
+                # Skip if in drag sequence
+                if is_in_drag_sequence(events, i):
+                    continue
+                
+                # Calculate active window
+                active_duration = int(gap * movement_percentage)
+                buffer_start = (gap - active_duration) // 2
+                movement_start = current_time + buffer_start
+                
+                # Get start position
+                start_x, start_y = 500, 500
+                for j in range(i, -1, -1):
+                    x_val = events[j].get("X")
+                    y_val = events[j].get("Y")
+                    if x_val is not None and y_val is not None:
+                        start_x = int(x_val)
+                        start_y = int(y_val)
+                        break
+                
+                # Get next position (where we need to end up)
+                next_x, next_y = start_x, start_y
+                for j in range(i + 1, min(i + 20, len(events))):
+                    x_val = events[j].get("X")
+                    y_val = events[j].get("Y")
+                    if x_val is not None and y_val is not None:
+                        next_x = int(x_val)
+                        next_y = int(y_val)
+                        break
+                
+                # Reserve last 25% for smooth transition back
+                transition_duration = int(active_duration * 0.25)
+                pattern_duration = active_duration - transition_duration
+                
+                # Choose movement behavior
+                behavior = rng.choice([
+                    'wander',      # Random wandering around
+                    'check_edge',  # Quick look at screen edge
+                    'fidget',      # Small nervous movements
+                    'explore',     # Move far then return
+                    'drift',       # Slow meandering
+                    'scan'         # Move across screen
+                ])
+                
+                pattern_end_x, pattern_end_y = start_x, start_y
+                pattern_time_used = 0
+                
+                if behavior == 'wander':
+                    # Random wandering - multiple small moves
+                    num_moves = rng.randint(3, 6)
+                    move_duration = pattern_duration // num_moves
+                    
+                    current_x, current_y = start_x, start_y
+                    
+                    for move_idx in range(num_moves):
+                        # Pick random nearby target
+                        target_x = current_x + rng.randint(-150, 150)
+                        target_y = current_y + rng.randint(-100, 100)
+                        target_x = max(100, min(1800, target_x))
+                        target_y = max(100, min(1000, target_y))
+                        
+                        # Generate human path
+                        path = generate_human_path(current_x, current_y, target_x, target_y, move_duration, rng)
+                        
+                        for path_time, px, py in path:
+                            abs_time = movement_start + pattern_time_used + path_time
+                            result.append({
+                                "Time": abs_time,
+                                "Type": "MouseMove",
+                                "X": px,
+                                "Y": py
+                            })
+                        
+                        current_x, current_y = path[-1][1], path[-1][2]
+                        pattern_time_used += move_duration
+                    
+                    pattern_end_x, pattern_end_y = current_x, current_y
+                
+                elif behavior == 'check_edge':
+                    # Quick look at screen edge then back
+                    edges = [
+                        (150, start_y),    # Left edge
+                        (1750, start_y),   # Right edge
+                        (start_x, 150),    # Top edge
+                        (start_x, 950),    # Bottom edge
+                    ]
+                    edge_x, edge_y = rng.choice(edges)
+                    
+                    # Move to edge (60% of time, fast)
+                    edge_duration = int(pattern_duration * 0.6)
+                    path_to_edge = generate_human_path(start_x, start_y, edge_x, edge_y, edge_duration, rng)
+                    
+                    for path_time, px, py in path_to_edge:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    # Return near start (40% of time, slower)
+                    return_duration = pattern_duration - edge_duration
+                    return_x = start_x + rng.randint(-40, 40)
+                    return_y = start_y + rng.randint(-40, 40)
+                    return_x = max(100, min(1800, return_x))
+                    return_y = max(100, min(1000, return_y))
+                    
+                    path_return = generate_human_path(edge_x, edge_y, return_x, return_y, return_duration, rng)
+                    
+                    for path_time, px, py in path_return:
+                        abs_time = movement_start + edge_duration + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    pattern_end_x, pattern_end_y = path_return[-1][1], path_return[-1][2]
+                    pattern_time_used = pattern_duration
+                
+                elif behavior == 'fidget':
+                    # Small rapid movements in small area
+                    num_fidgets = rng.randint(5, 10)
+                    fidget_duration = pattern_duration // num_fidgets
+                    
+                    current_x, current_y = start_x, start_y
+                    
+                    for fidget_idx in range(num_fidgets):
+                        # Small offset
+                        target_x = current_x + rng.randint(-30, 30)
+                        target_y = current_y + rng.randint(-30, 30)
+                        target_x = max(100, min(1800, target_x))
+                        target_y = max(100, min(1000, target_y))
+                        
+                        path = generate_human_path(current_x, current_y, target_x, target_y, fidget_duration, rng)
+                        
+                        for path_time, px, py in path:
+                            abs_time = movement_start + pattern_time_used + path_time
+                            result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                        
+                        current_x, current_y = path[-1][1], path[-1][2]
+                        pattern_time_used += fidget_duration
+                    
+                    pattern_end_x, pattern_end_y = current_x, current_y
+                
+                elif behavior == 'explore':
+                    # Move far away then return near start
+                    away_x = start_x + rng.randint(-400, 400)
+                    away_y = start_y + rng.randint(-300, 300)
+                    away_x = max(100, min(1800, away_x))
+                    away_y = max(100, min(1000, away_y))
+                    
+                    # Go away (65% of time)
+                    away_duration = int(pattern_duration * 0.65)
+                    path_away = generate_human_path(start_x, start_y, away_x, away_y, away_duration, rng)
+                    
+                    for path_time, px, py in path_away:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    # Return (35% of time)
+                    return_duration = pattern_duration - away_duration
+                    return_x = start_x + rng.randint(-15, 15)
+                    return_y = start_y + rng.randint(-15, 15)
+                    return_x = max(100, min(1800, return_x))
+                    return_y = max(100, min(1000, return_y))
+                    
+                    path_return = generate_human_path(away_x, away_y, return_x, return_y, return_duration, rng)
+                    
+                    for path_time, px, py in path_return:
+                        abs_time = movement_start + away_duration + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    pattern_end_x, pattern_end_y = path_return[-1][1], path_return[-1][2]
+                    pattern_time_used = pattern_duration
+                
+                elif behavior == 'drift':
+                    # Slow continuous drift
+                    target_x = start_x + rng.randint(-200, 200)
+                    target_y = start_y + rng.randint(-150, 150)
+                    target_x = max(100, min(1800, target_x))
+                    target_y = max(100, min(1000, target_y))
+                    
+                    path = generate_human_path(start_x, start_y, target_x, target_y, pattern_duration, rng)
+                    
+                    for path_time, px, py in path:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    pattern_end_x, pattern_end_y = path[-1][1], path[-1][2]
+                    pattern_time_used = pattern_duration
+                
+                elif behavior == 'scan':
+                    # Scan across screen
+                    scan_distance = rng.randint(300, 600)
+                    direction = rng.choice(['horizontal', 'vertical', 'diagonal'])
+                    
+                    if direction == 'horizontal':
+                        target_x = start_x + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                        target_y = start_y + rng.randint(-50, 50)
+                    elif direction == 'vertical':
+                        target_x = start_x + rng.randint(-50, 50)
+                        target_y = start_y + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                    else:  # diagonal
+                        target_x = start_x + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                        target_y = start_y + (scan_distance if rng.random() < 0.5 else -scan_distance)
+                    
+                    target_x = max(100, min(1800, target_x))
+                    target_y = max(100, min(1000, target_y))
+                    
+                    path = generate_human_path(start_x, start_y, target_x, target_y, pattern_duration, rng)
+                    
+                    for path_time, px, py in path:
+                        abs_time = movement_start + path_time
+                        result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                    
+                    pattern_end_x, pattern_end_y = path[-1][1], path[-1][2]
+                    pattern_time_used = pattern_duration
+                
+                # Smooth transition back to next recorded position
+                transition_path = generate_human_path(
+                    pattern_end_x, pattern_end_y,
+                    next_x, next_y,
+                    transition_duration,
+                    rng
+                )
+                
+                for path_time, px, py in transition_path:
+                    abs_time = movement_start + pattern_duration + path_time
+                    result.append({"Time": abs_time, "Type": "MouseMove", "X": px, "Y": py})
+                
+                total_idle_time += active_duration
+    
+    return result, total_idle_time
+
+class QueueFileSelector:
+    def __init__(self, rng, all_files, durations_cache):
+        self.rng = rng
+        self.durations = durations_cache
+        self.efficient = [f for f in all_files if "¬¬" not in f.name]
+        self.inefficient = [f for f in all_files if "¬¬" in f.name]
+        self.eff_pool = list(self.efficient)
+        self.ineff_pool = list(self.inefficient)
+        self.rng.shuffle(self.eff_pool)
+        self.rng.shuffle(self.ineff_pool)
+
+    def get_sequence(self, target_minutes, force_inef=False, strictly_eff=False):
+        seq, cur_ms = [], 0.0
+        target_ms = target_minutes * 60000
+        actual_force = force_inef if not strictly_eff else False
+        while cur_ms < target_ms:
+            if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
+            elif self.eff_pool: pick = self.eff_pool.pop(0)
+            elif self.efficient:
+                self.eff_pool = list(self.efficient); self.rng.shuffle(self.eff_pool)
+                pick = self.eff_pool.pop(0)
+            elif self.ineff_pool and not strictly_eff: pick = self.ineff_pool.pop(0)
+            else: break
+            seq.append(pick)
+            
+            # FIXED: Account for ALL time additions during processing
+            file_duration = self.durations.get(pick, 2000)
+            
+            # 1. Original file duration
+            estimated_time = file_duration
+            
+            # 2. Inter-file gap (1-3s, average 2s, with potential multiplier up to 3x)
+            estimated_time += 2000 * 2  # Conservative estimate (2s × avg multiplier 2x)
+            
+            # 3. Intra-file pauses (55% chance every ~5 actions, ~5s each)
+            # Estimate: ~20% of file duration added as intra-pauses
+            estimated_time += file_duration * 0.20
+            
+            # 4. Idle movements (40-50% of gaps >= 5s)
+            # Estimate: ~10% of file duration added as idle movements
+            estimated_time += file_duration * 0.10
+            
+            # 5. Pre-click jitter (negligible - 100-200ms × 45% clicks)
+            # Can ignore as it's minimal compared to other factors
+            
+            cur_ms += estimated_time
+            
+            # Safety limits
+            if len(seq) > 1000: break
+            if cur_ms > target_ms * 5: break  # Additional safety: never exceed 5x target
+        return seq
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input_root", type=str)
+    parser.add_argument("output_root", type=Path)
+    parser.add_argument("--versions", type=int, default=6)
+    parser.add_argument("--target-minutes", type=int, default=35)
+    parser.add_argument("--bundle-id", type=int, required=True)
+    parser.add_argument("--speed-range", type=str, default="1.0 1.0")
+    args = parser.parse_args()
+
+    search_base = Path(args.input_root).resolve()
+    if not search_base.exists():
+        search_base = Path(".").resolve()
+        
+    originals_root = None
+    for d in ["originals", "input_macros"]:
+        test_path = search_base / d
+        if test_path.exists() and test_path.is_dir():
+            originals_root = test_path
+            break
+            
+    if not originals_root:
+        originals_root = search_base
+    
+    logout_file = None
+    logout_patterns = ["logout.json", "- logout.json", "-logout.json", "logout", "- logout", "-logout"]
+    
+    for location_dir in [originals_root, originals_root.parent, search_base]:
+        if logout_file:
+            break
+        for pattern in logout_patterns:
+            test_file = location_dir / pattern
+            for test_path in [test_file, Path(str(test_file) + ".json")]:
+                if test_path.exists() and test_path.is_file():
+                    logout_file = test_path
+                    print(f"✓ Found logout file at: {logout_file}")
+                    break
+            if logout_file:
+                break
+
+    bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    rng = random.Random()
+    pools = {}
+    z_storage = {}
+    durations_cache = {}
+
+    for root, dirs, files in os.walk(originals_root):
+        curr = Path(root)
+        if any(p in curr.parts for p in [".git", ".github", "output"]): continue
+        
+        jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
+        non_jsons = [f for f in files if not f.endswith(".json")]
+        
+        if not jsons: continue
+        
+        is_z_storage = "z +100" in str(curr).lower()
+        
+        if is_z_storage:
+            parent_scope = None
+            for part in curr.parts:
+                if "desktop" in part.lower() or "mobile" in part.lower():
+                    parent_scope = part
+                    break
+            
+            if parent_scope:
+                macro_id = clean_identity(curr.name)
+                key = (parent_scope, macro_id)
+                if key not in z_storage:
+                    z_storage[key] = []
+                
+                for f in jsons:
+                    file_path = curr / f
+                    z_storage[key].append(file_path)
+                    durations_cache[file_path] = get_file_duration_ms(file_path)
+        else:
+            macro_id = clean_identity(curr.name)
+            rel_path = curr.relative_to(originals_root)
+            
+            parent_scope = None
+            for part in curr.parts:
+                if "desktop" in part.lower() or "mobile" in part.lower():
+                    parent_scope = part
+                    break
+            
+            key = str(rel_path).lower()
+            if key not in pools:
+                is_ts = bool(re.search(r'time[\s-]*sens', key))
+                file_paths = [curr / f for f in jsons]
+                
+                pools[key] = {
+                    "rel_path": rel_path,
+                    "files": file_paths,
+                    "is_ts": is_ts,
+                    "macro_id": macro_id,
+                    "parent_scope": parent_scope,
+                    "non_json_files": [curr / f for f in non_jsons]
+                }
+                
+                for fp in file_paths:
+                    durations_cache[fp] = get_file_duration_ms(fp)
+
+    for pool_key, pool_data in pools.items():
+        parent_scope = pool_data["parent_scope"]
+        macro_id = pool_data["macro_id"]
+        
+        z_key = (parent_scope, macro_id)
+        if z_key in z_storage:
+            pool_data["files"].extend(z_storage[z_key])
+    
+    for pool_key, pool_data in pools.items():
+        all_files = pool_data["files"]
+        always_files = [f for f in all_files if is_always_first_or_last_file(Path(f).name)]
+        mergeable_files = [f for f in all_files if f not in always_files]
+        pool_data["files"] = mergeable_files
+        pool_data["always_files"] = always_files
+    
+    for key, data in pools.items():
+        folder_name = data["rel_path"].name
+        folder_number = extract_folder_number(folder_name)
+        
+        if folder_number == 0:
+            print(f"WARNING: No number found in folder name '{folder_name}', using 0")
+        
+        data["folder_number"] = folder_number
+    
+    for key, data in pools.items():
+        folder_number = data["folder_number"]
+        
+        if not data["files"]:
+            print(f"Skipping folder (0 files): {data['rel_path']}")
+            continue
+        
+        original_rel_path = data["rel_path"]
+        
+        out_f = bundle_dir / original_rel_path
+        out_f.mkdir(parents=True, exist_ok=True)
+        
+        if logout_file:
+            try:
+                original_name = logout_file.name
+                # Add folder number prefix with leading dash and make UPPERCASE: "logout.json" → "- 46 LOGOUT.JSON"
+                if original_name.startswith("-"):
+                    # Already has dash: "- logout.json" → "- 46 LOGOUT.JSON"
+                    new_name = f"- {folder_number} {original_name[1:].strip()}".upper()
+                else:
+                    # Add dash: "logout.json" → "- 46 LOGOUT.JSON"
+                    new_name = f"- {folder_number} {original_name}".upper()
+                logout_dest = out_f / new_name
+                shutil.copy2(logout_file, logout_dest)
+                print(f"  ✓ Copied logout: {original_name} → {new_name}")
+            except Exception as e:
+                print(f"  ✗ Error copying {logout_file.name}: {e}")
+        else:
+            print(f"  ⚠ Warning: No logout file found")
+        
+        if "non_json_files" in data and data["non_json_files"]:
+            for non_json_file in data["non_json_files"]:
+                try:
+                    original_name = non_json_file.name
+                    # Keep leading dash if present: "RuneLite_file.png" → "- 46 RuneLite_file.png"
+                    if original_name.startswith("-"):
+                        # Already has dash: "- file.png" → "- 46 file.png"
+                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                    else:
+                        # Add dash: "file.png" → "- 46 file.png"
+                        new_name = f"- {folder_number} {original_name}"
+                    shutil.copy2(non_json_file, out_f / new_name)
+                    print(f"  ✓ Copied non-JSON file: {original_name} → {new_name}")
+                except Exception as e:
+                    print(f"  ✗ Error copying {non_json_file.name}: {e}")
+        
+        if "always_files" in data and data["always_files"]:
+            for always_file in data["always_files"]:
+                try:
+                    original_name = Path(always_file).name
+                    # Add folder number prefix: "- always first.json" → "- 46 always first.json"
+                    # Handle files starting with "-" or "always"
+                    if original_name.startswith("-"):
+                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                    else:
+                        new_name = f"{folder_number} {original_name}"
+                    shutil.copy2(always_file, out_f / new_name)
+                    print(f"  ✓ Copied 'always' file: {original_name} → {new_name}")
+                except Exception as e:
+                    print(f"  ✗ Error copying {Path(always_file).name}: {e}")
+        
+        total_original_ms = sum(durations_cache.get(f, 0) for f in data["files"])
+        
+        manifest = [
+            f"MANIFEST FOR FOLDER: {original_rel_path}",
+            "=" * 40,
+            f"Total Available Files: {len(data['files'])}",
+            f"Total Original Duration: {format_ms_precise(total_original_ms)}",
+            f"Folder Number: {folder_number}",
+            "",
+            ""
+        ]
+        
+        norm_v = args.versions
+        inef_v = 0 if data["is_ts"] else (norm_v // 2)
+        
+        for v_idx in range(1, (norm_v + inef_v) + 1):
+            is_inef = (v_idx > norm_v)
+            v_letter = chr(64 + v_idx)
+            v_code = f"{folder_number}_{v_letter}"  # Changed from {folder_number}{v_letter}
+            
+            if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
+            elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
+            else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+            
+            movement_percentage = rng.uniform(0.40, 0.50)
+            
+            total_idle_movements = 0
+            total_intra_pauses = 0  # Track intra-file pauses separately
+            total_gaps = 0
+            total_afk_pool = 0
+            total_jitter_count = 0  # Track pre-click jitters
+            file_segments = []
+            massive_pause_info = None
+            merged = []
+            timeline = 0
+            
+            paths = QueueFileSelector(rng, data["files"], durations_cache).get_sequence(args.target_minutes, is_inef, data["is_ts"])
+            
+            if not paths:
+                continue
+            
+            for i, p in enumerate(paths):
+                raw = load_json_events(p)
+                if not raw: continue
+                
+                # Step 1: Add pre-click jitter (45% chance before clicks)
+                raw_with_jitter, jitter_count = add_pre_click_jitter(raw, rng)
+                total_jitter_count += jitter_count
+                
+                # Step 2: Insert random intra-file pauses between actions
+                raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
+                total_intra_pauses += intra_pause_time
+                
+                # Step 3: Insert idle mouse movements in gaps >= 5 seconds
+                raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
+                total_idle_movements += idle_time
+                
+                t_vals = [int(e["Time"]) for e in raw_with_movements]
+                base_t = min(t_vals)
+                
+                # Inter-file gap: 1000-3000ms (non-rounded) × multiplier
+                if i > 0:
+                    gap = int(rng.uniform(1000.123, 2999.987) * mult)
+                else:
+                    gap = 0
+                timeline += gap
+                total_gaps += gap
+                
+                file_start_idx = len(merged)  # Track where this file starts in merged array
+                
+                for e in raw_with_movements:
+                    ne = {**e}
+                    rel_offset = int(int(e["Time"]) - base_t)
+                    ne["Time"] = timeline + rel_offset
+                    merged.append(ne)
+                
+                timeline = merged[-1]["Time"]
+                file_end_idx = len(merged) - 1  # Track where this file ends
+                file_segments.append({
+                    "name": p.name, 
+                    "end_time": timeline,
+                    "start_idx": file_start_idx,
+                    "end_idx": file_end_idx
+                })
+            
+            total_afk_pool = total_idle_movements
+            
+            # Insert OSRS chat message (5% chance) at the start of merged file
+            chat_inserted = False
+            if merged:
+                merged, chat_inserted = insert_osrs_chat_message(merged, rng)
+                if chat_inserted:
+                    # Update timeline to account for chat at beginning
+                    timeline = merged[-1]["Time"]
+            
+            if is_inef and not data["is_ts"] and len(merged) > 1:
+                p_ms = rng.randint(300000, 720000)
+                split = rng.randint(0, len(merged) - 2)
+                for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
+                timeline = merged[-1]["Time"]
+                massive_pause_info = f"Massive P1: {format_ms_precise(p_ms)}"
+                
+                # ✅ FIXED: Update file segment end times based on which events are affected
+                for seg in file_segments:
+                    # If ANY event in this file segment is after the split, update end time
+                    if seg["end_idx"] > split:
+                        # The last event of this file is affected by the pause
+                        seg["end_time"] = merged[seg["end_idx"]]["Time"]
+            
+            fname = f"{'¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            (out_f / fname).write_text(json.dumps(merged, indent=2))
+            
+            total_pause = total_gaps + total_afk_pool + total_intra_pauses
+            if massive_pause_info:
+                version_label = f"Version {v_code} [EXTRA - INEFFICIENT] (Multiplier: x{mult}):"
+            else:
+                version_label = f"Version {v_code} (Multiplier: x{mult}):"
+            
+            manifest_entry = [
+                version_label,
+                f"  TOTAL DURATION: {format_ms_precise(timeline)}",
+                f"  Pre-Click Jitter: {total_jitter_count} clicks had jitter (45% chance)",
+                f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (5% chance)'}",
+                f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time)",
+                f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:",
+                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (random pauses between actions)",
+                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)",
+                f"    - AFK Pool (Idle Movements): {format_ms_precise(total_afk_pool)}"
+            ]
+            
+            if massive_pause_info:
+                manifest_entry.append(f"    - {massive_pause_info}")
+            
+            manifest_entry.append("")
+            
+            for idx, seg in enumerate(file_segments):
+                bullet = "*" if idx < 11 else "-"
+                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
+            
+            manifest_entry.append("-" * 30)
+            manifest.append("\n".join(manifest_entry))
+
+        (out_f / f"!_MANIFEST_{folder_number}_!.txt").write_text("\n".join(manifest))
+
+if __name__ == "__main__":
+    main()
