@@ -15,6 +15,10 @@ merge_macros.py - v3.5.2 - IMPROVED ACCURACY: File Selection
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
+# Script version
+VERSION = "v3.5.2"
+
+
 # OSRS chat messages for realism (106 common phrases)
 OSRS_CHAT_MESSAGES = [
     # Levels/Stats
@@ -938,6 +942,8 @@ def main():
         manifest = [
             f"MANIFEST FOR FOLDER: {original_rel_path}",
             "=" * 40,
+            f"Merged Bundle: merged_bundle_{args.bundle_id}",
+            f"Script Version: {VERSION}",
             f"Total Available Files: {len(data['files'])}",
             f"Total Original Duration: {format_ms_precise(total_original_ms)}",
             f"Folder Number: {folder_number}",
