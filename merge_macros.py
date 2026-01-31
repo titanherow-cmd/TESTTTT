@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.5.6 - MANIFEST FIX: Pause Calculation
-- FIX: Manifest no longer double-counts idle movements
-- FIX: "total PAUSE" now only shows ADDED time (intra + inter)
-- FIX: Idle movements shown separately as informational (not added time)
-- PREVIOUS: v3.5.5 - Fixed negative timestamps
-- FEATURE: 326 diverse chat messages
-- FEATURE: 50% jitter, 20% chat, accurate tracking
+merge_macros.py - v3.5.7 - REDUCED INTRA-FILE PAUSES
+- FIX: Intra-file pause chance reduced to 40% (from 55%)
+- FIX: Pause duration reduced to 3000-5000ms (from 3500-6500ms)
+- FIX: Pause frequency reduced (every 5-10 actions, from 3-7)
+- RESULT: Much shorter files, more natural pacing
+- PREVIOUS: v3.5.6 - Fixed manifest pause calculation
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.5.6"
+VERSION = "v3.5.7"
 
 
 # OSRS chat messages for realism (250+ diverse phrases)
@@ -521,8 +520,8 @@ def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
 def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     """
     Insert random pauses between recorded actions within a file.
-    Before every ~5 actions, 55% chance to insert a 3500-6500ms pause.
-    Uses non-rounded values for natural timing.
+    40% chance to insert a 3000-5000ms pause (non-rounded).
+    Pauses occur randomly throughout the file, not on a fixed interval.
     Returns (events_with_pauses, total_pause_time).
     """
     if not events or len(events) < 2:
@@ -535,13 +534,13 @@ def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     while i < len(events):
         action_counter += 1
         
-        # Every 3-7 actions (random), check if we should insert pause
-        if action_counter >= rng.randint(3, 7) and i < len(events) - 1:
-            # 55% chance to insert pause
-            if rng.random() < 0.55:
-                # Generate non-rounded pause duration (3500-6500ms)
+        # Check every 5-10 actions (less frequent than before)
+        if action_counter >= rng.randint(5, 10) and i < len(events) - 1:
+            # 40% chance to insert pause (reduced from 55%)
+            if rng.random() < 0.40:
+                # Generate non-rounded pause duration (3000-5000ms)
                 # Use floats then convert to avoid round numbers
-                pause_duration = int(rng.uniform(3500.123, 6499.987))
+                pause_duration = int(rng.uniform(3000.123, 4999.987))
                 total_pause_added += pause_duration
                 
                 # Shift all subsequent events by this pause
