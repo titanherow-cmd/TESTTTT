@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.5.5 - CRITICAL BUGFIX: Negative Timestamps
-- FIX: Chat insertion no longer creates negative timestamps (playback bug)
-- FIX: Chat now starts at time 0, shifts all events forward correctly
-- PREVIOUS: v3.5.4 - Chat caused files to stop playback immediately
-- FEATURE: 326 diverse chat messages (brain rot, memes, sarcasm, etc.)
-- FEATURE: 50% pre-click jitter, 20% chat rate
-- FEATURE: All anti-detection features active
+merge_macros.py - v3.5.6 - MANIFEST FIX: Pause Calculation
+- FIX: Manifest no longer double-counts idle movements
+- FIX: "total PAUSE" now only shows ADDED time (intra + inter)
+- FIX: Idle movements shown separately as informational (not added time)
+- PREVIOUS: v3.5.5 - Fixed negative timestamps
+- FEATURE: 326 diverse chat messages
+- FEATURE: 50% jitter, 20% chat, accurate tracking
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.5.5"
+VERSION = "v3.5.6"
 
 
 # OSRS chat messages for realism (250+ diverse phrases)
@@ -1155,7 +1155,10 @@ def main():
             fname = f"{'¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
-            total_pause = total_gaps + total_afk_pool + total_intra_pauses
+            # FIXED: Idle movements are INSIDE gaps, not additional time
+            # Only count intra-pauses and inter-gaps as added time
+            total_pause = total_intra_pauses + total_gaps
+            
             if massive_pause_info:
                 version_label = f"Version {v_code} [EXTRA - INEFFICIENT] (Multiplier: x{mult}):"
             else:
@@ -1166,12 +1169,14 @@ def main():
                 f"  TOTAL DURATION: {format_ms_precise(timeline)}",
                 f"  Pre-Click Jitter: {total_jitter_count}/{total_clicks} clicks had jitter ({total_jitter_count/total_clicks*100 if total_clicks > 0 else 0:.0f}% - target 50%)",
                 f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (20% chance)'}",
-                f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time)",
-                f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:",
+                f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time) - informational only",
+                f"  total PAUSE ADDED: {format_ms_precise(total_pause)} +BREAKDOWN:",
                 f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (random pauses between actions)",
-                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)",
-                f"    - AFK Pool (Idle Movements): {format_ms_precise(total_afk_pool)}"
+                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)"
             ]
+            
+            # Note: Idle movements shown separately as they're not "added" pause
+            manifest_entry.append(f"  Note: Idle movements ({format_ms_precise(total_afk_pool)}) are inserted into existing gaps, not added time")
             
             if massive_pause_info:
                 manifest_entry.append(f"    - {massive_pause_info}")
