@@ -1,64 +1,159 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.5.2 - IMPROVED ACCURACY: File Selection
-- FIX: Accurate 8x multiplier based on real measured data (not estimates)
-- FIX: Reduced safety limits (800 files, 3x target) for better accuracy
-- PREVIOUS: v3.5.1 - Had 2.5x multiplier (too low, caused 210min instead of 35min)
-- PREVIOUS: v3.5.0 - Pre-click jitter & OSRS chat messages
-- FEATURE: Pre-click jitter (45% chance before clicks, ±1-3px with snap back)
-- FEATURE: OSRS chat messages (5% chance per file, 106 realistic phrases)
-- FEATURE: Human-like mouse movements with variable speeds (0-2500+ px/s)
-- FEATURE: Intra-file pauses (3.5-6.5s, 55% chance every ~5 actions)
-- FEATURE: Inter-file gaps (1-3s, non-rounded, variable multipliers)
+merge_macros.py - v3.5.5 - CRITICAL BUGFIX: Negative Timestamps
+- FIX: Chat insertion no longer creates negative timestamps (playback bug)
+- FIX: Chat now starts at time 0, shifts all events forward correctly
+- PREVIOUS: v3.5.4 - Chat caused files to stop playback immediately
+- FEATURE: 326 diverse chat messages (brain rot, memes, sarcasm, etc.)
+- FEATURE: 50% pre-click jitter, 20% chat rate
+- FEATURE: All anti-detection features active
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.5.2"
+VERSION = "v3.5.5"
 
 
-# OSRS chat messages for realism (106 common phrases)
+# OSRS chat messages for realism (250+ diverse phrases)
 OSRS_CHAT_MESSAGES = [
-    # Levels/Stats
+    # === OSRS GAME SPECIFIC ===
+    # Levels/Stats Questions
     "what lvl fishing?", "whats ur mining lvl", "combat lvl?", "stats?", 
     "total level?", "how long for 99?", "what cb lvl?", "ur cooking level?",
-    # Quests
+    "str lvl?", "magic level?", "prayer lvl?", "slayer?",
+    
+    # Quest Questions  
     "doing rfd?", "finished ds2 yet?", "what quest u doing", "need quest help?",
-    "sote done?", "got qpc?", "how many qp", "best quest for xp?",
-    # Skilling
-    "afk spot?", "good money maker?", "where u training?", "fastest route to 99?",
-    "how much gp/hr", "efficient?", "worth it?", "better than mlm?",
-    # Items/Gear
-    "price check?", "how much is fury", "cheaper alternative?", "worth upgrading?",
-    "bis for this?", "which spec weapon", "good for training?", "sell or keep?",
-    # PvM
+    "sote done?", "got qpc?", "how many qp", "quest worth it?",
+    
+    # Noob Questions
+    "how do i get there", "where is ge", "how to make money", "best weapon for my lvl",
+    "how to train fast", "is this members only", "whats bis", "how does this work",
+    "im lost lol", "first time playing", "just started", "any tips for noobs",
+    
+    # Skilling/Training
+    "afk spot?", "good money maker?", "where u training?", "how much gp/hr",
+    "worth it?", "better than mlm?", "xp rates?", "fastest method?",
+    
+    # Items/Economy
+    "price check?", "how much is fury", "worth upgrading?", "bis for this?",
+    "ge price?", "merching?", "crashed?", "flipping?", "lost bank lol",
+    
+    # PvM/Combat
     "solo or team?", "kc?", "got pet yet?", "drop rate?",
-    "doing slayer?", "which boss?", "task?", "good master?",
-    # General
-    "bank standing lol", "skilling or pvm?", "members worth it?", "f2p or p2p",
-    "main or iron?", "hcim btw", "on mobile rn", "lagging?",
-    # Resources/Location
-    "crowded?", "this world busy", "hop?", "better spot?",
-    "empty world?", "where is this", "how to get there", "tele?",
-    # Achievement/Progress
-    "just got 99", "first time here", "learning this boss", "finally completed",
-    "took forever", "bad rng", "got lucky", "spooned lol",
-    # Advice/Help
-    "any tips?", "recommended setup?", "should i boost?", "worth the grind?",
-    "how long did it take", "hard or easy?", "beginners guide?", "efficient method?",
-    # Social/Banter
-    "nice", "gz", "gratz", "gl", "same", "lol", "ty", "np", "gn", "afk rn",
-    # Economy
-    "ge price?", "merching?", "crashed?", "manipulation?",
-    "buy limit?", "flipping?", "good investment?", "lost bank lol",
-    # Updates/Meta
-    "new update good?", "nerfed?", "buffed?", "meta now?",
-    "still viable?", "changed?", "poll passed?", "when update",
-    # Miscellaneous
-    "dc'd", "server lag?", "game froze", "connection lost",
-    "brb", "switching worlds", "crashed", "my bad"
+    "doing slayer?", "which boss?", "task?", "easy boss?",
+    
+    # World/Location
+    "crowded?", "this world busy", "hop?", "empty world?",
+    "better spot?", "where is this", "tele?", "f2p world?",
+    
+    # Progress/Achievement  
+    "just got 99", "first time here", "finally completed", "took forever",
+    "bad rng", "got lucky", "spooned lol", "gz me",
+    
+    # === CASUAL CHAT/REACTIONS ===
+    # One Word/Short Reactions
+    "nice", "lol", "lmao", "bruh", "oof", "rip", "yikes", "sheesh",
+    "fr", "ngl", "tbh", "icl", "damn", "omg", "wow", "what",
+    "bro", "dude", "man", "yo", "ayy", "ayo", "yoo", "hey",
+    
+    # Exclamations/Expressions
+    "oh boy", "oh no", "oh god", "oh damn", "lets go", "there we go",
+    "here we go again", "not again", "why tho", "makes sense", "fair enough",
+    "i guess", "whatever", "meh", "eh", "huh", "hmm", "idk man",
+    
+    # Brain Rot / Meme Speak
+    "6 7 6 7 6 7", "caught in 4k", "no cap", "its giving", "slay",
+    "ate", "serve", "literally me", "real", "so true", "based",
+    "cringe", "mid", "L", "W", "ratio", "touch grass",
+    "skill issue", "cope", "mald", "gamer moment", "ez clap",
+    "gg ez", "diff", "built different", "simply better", "too easy",
+    
+    # Tired/Bored Comments
+    "im so bored", "this is boring", "so tired rn", "need coffee",
+    "been here for hours", "cant feel my hands", "eyes hurt", "so sleepy",
+    "gonna fall asleep", "zzzz", "wake me up", "end me",
+    
+    # Funny One-Liners
+    "this game lol", "why am i here", "what am i doing with my life",
+    "i need a life", "touch grass challenge", "grass is a myth",
+    "sunlight is overrated", "sleep is for the weak", "one more hour",
+    "just 5 more minutes", "ill stop soon", "yeah right",
+    
+    # Sarcastic/Cynical
+    "this is fine", "totally worth it", "best game ever", "10/10 gameplay",
+    "riveting content", "peak gaming", "what could go wrong", "seems legit",
+    "totally not addicted", "healthy lifestyle", "productive", "time well spent",
+    
+    # Self Commentary  
+    "why did i click that", "misclick", "my bad", "oops", "fail",
+    "i messed up", "wrong spot", "forgot to bank", "ran out of food",
+    "died lol", "rip me", "should have known", "classic me",
+    
+    # Observational
+    "this guy is just...", "look at this dude", "bro what", "no way",
+    "are you serious", "tell me why", "explain pls", "how even",
+    "that shouldnt work", "thats wild", "insane", "crazy",
+    
+    # === GENERAL TOPICS ===
+    # TV Shows/Movies
+    "anybody watching breaking bad", "game of thrones was good", "stranger things new season",
+    "the office is peak", "watching netflix rn", "good show recommendations?",
+    "just finished watching X", "that show is trash", "overrated show",
+    
+    # Music
+    "music recommendations?", "listening to spotify", "good playlist?",
+    "this song slaps", "music taste check", "whats everyone listening to",
+    
+    # Food/Drinks
+    "pizza time", "ordering food", "starving rn", "getting snacks",
+    "coffee break", "energy drink time", "need food", "eating rn",
+    
+    # Weather/Time
+    "its so hot", "freezing here", "nice weather", "raining outside",
+    "what time is it", "so late rn", "pulling an all nighter",
+    "sun is up already", "cant believe its morning",
+    
+    # Weekend/Days
+    "its friday!", "weekend vibes", "hate mondays", "long week",
+    "finally weekend", "back to work tomorrow", "no work today",
+    
+    # Sleep Schedule  
+    "sleep schedule ruined", "havent slept", "all nighter again",
+    "gonna fix sleep schedule", "totally waking up early tomorrow",
+    "5am already?", "sun is coming up", "birds are chirping",
+    
+    # === SOCIAL/INTERACTIVE ===
+    # Greetings
+    "morning", "gn everyone", "later guys", "cya", "peace",
+    "im out", "gtg", "afk", "back", "hello",
+    
+    # Thanks/Positive  
+    "ty", "thanks", "appreciate it", "helpful", "gz", "gratz",
+    "nice one", "good job", "well done", "impressive", "respect",
+    
+    # Questions to Others
+    "how long you been playing", "what you doing", "grinding what",
+    "hows it going", "whats good", "sup", "you good?", "all good?",
+    
+    # Agreeing/Relating
+    "same", "me too", "relatable", "felt that", "so true", "exactly",
+    "big mood", "mood", "same energy", "literally", "fr fr",
+    
+    # === RANDOM FILLER ===
+    # Random Observations
+    "interesting", "noted", "i see", "makes sense", "understandable",
+    "cool cool", "alright", "sure", "okay then", "if you say so",
+    
+    # Confusion
+    "wait what", "come again?", "huh?", "confused", "dont get it",
+    "elaborate pls", "context?", "why", "how", "what happened",
+    
+    # Misc Short Phrases
+    "gg", "gl", "gl hf", "wp", "nt", "mb", "np", "idc",
+    "idm", "idk", "tbf", "imo", "fyi", "btw", "rn", "asap",
 ]
 
 def load_json_events(path: Path):
@@ -257,15 +352,16 @@ def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
 
 def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
     """
-    Add realistic pre-click jitter: before 45% of clicks, add 2-3 micro-movements
+    Add realistic pre-click jitter: before 50% of clicks, add 2-3 micro-movements
     around the target (±1-3px), then snap back to exact click position.
     This simulates human hesitation and aiming before clicking.
-    Returns (events_with_jitter, jitter_count).
+    Returns (events_with_jitter, jitter_count, total_clicks).
     """
     if not events or len(events) < 2:
-        return events, 0
+        return events, 0, 0
     
     jitter_count = 0
+    total_clicks = 0
     i = 0
     
     while i < len(events):
@@ -274,8 +370,10 @@ def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
         
         # Only apply to Click and RightDown events
         if event_type in ('Click', 'RightDown'):
-            # 45% chance to add pre-click jitter
-            if rng.random() < 0.45:
+            total_clicks += 1  # Count all clicks
+            
+            # 50% chance to add pre-click jitter (increased from 45%)
+            if rng.random() < 0.50:
                 click_x = event.get('X')
                 click_y = event.get('Y')
                 click_time = event.get('Time')
@@ -331,22 +429,22 @@ def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
         
         i += 1
     
-    return events, jitter_count
+    return events, jitter_count, total_clicks
 
 def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
     """
-    5% chance to insert a random OSRS chat message at the start of the merged file.
+    20% chance to insert a random OSRS chat message at the start of the merged file.
     Simulates typing a common phrase, adding realism to long sessions.
     Returns (events_with_chat, chat_inserted).
     """
-    if not events or rng.random() > 0.05:  # 5% chance
+    if not events or rng.random() > 0.20:  # 20% chance (increased from 5%)
         return events, False
     
     # Pick random message
     message = rng.choice(OSRS_CHAT_MESSAGES)
     
-    # Start time - add a small delay before the first recorded event
-    start_time = events[0].get('Time', 0) - rng.randint(500, 2000)
+    # FIXED: Start chat at time 0 (not negative!)
+    start_time = 0
     current_time = start_time
     
     chat_events = []
@@ -405,13 +503,17 @@ def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
         'KeyCode': 13
     })
     
-    # Add small delay after sending
-    final_delay = rng.randint(200, 500)
+    # Add small delay after sending before first action
+    final_delay = rng.randint(500, 2000)
+    current_time += final_delay
     
-    # Shift all original events forward by the total chat duration
-    total_chat_duration = (current_time - start_time) + final_delay
+    # FIXED: Shift all original events forward to start after the chat
+    # Chat ends at current_time, so original events start there
+    first_original_time = events[0].get('Time', 0)
+    time_shift = current_time - first_original_time
+    
     for event in events:
-        event['Time'] = int(event['Time']) + total_chat_duration
+        event['Time'] = int(event['Time']) + time_shift
     
     # Insert chat events at the beginning
     return chat_events + events, True
@@ -970,6 +1072,7 @@ def main():
             total_gaps = 0
             total_afk_pool = 0
             total_jitter_count = 0  # Track pre-click jitters
+            total_clicks = 0  # Track total clicks across all files
             file_segments = []
             massive_pause_info = None
             merged = []
@@ -984,9 +1087,10 @@ def main():
                 raw = load_json_events(p)
                 if not raw: continue
                 
-                # Step 1: Add pre-click jitter (45% chance before clicks)
-                raw_with_jitter, jitter_count = add_pre_click_jitter(raw, rng)
+                # Step 1: Add pre-click jitter (50% chance before clicks)
+                raw_with_jitter, jitter_count, click_count = add_pre_click_jitter(raw, rng)
                 total_jitter_count += jitter_count
+                total_clicks += click_count
                 
                 # Step 2: Insert random intra-file pauses between actions
                 raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
@@ -1060,8 +1164,8 @@ def main():
             manifest_entry = [
                 version_label,
                 f"  TOTAL DURATION: {format_ms_precise(timeline)}",
-                f"  Pre-Click Jitter: {total_jitter_count} clicks had jitter (45% chance)",
-                f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (5% chance)'}",
+                f"  Pre-Click Jitter: {total_jitter_count}/{total_clicks} clicks had jitter ({total_jitter_count/total_clicks*100 if total_clicks > 0 else 0:.0f}% - target 50%)",
+                f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (20% chance)'}",
                 f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time)",
                 f"  total PAUSE: {format_ms_precise(total_pause)} +BREAKDOWN:",
                 f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (random pauses between actions)",
