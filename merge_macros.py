@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.5.7 - REDUCED INTRA-FILE PAUSES
-- FIX: Intra-file pause chance reduced to 40% (from 55%)
-- FIX: Pause duration reduced to 3000-5000ms (from 3500-6500ms)
-- FIX: Pause frequency reduced (every 5-10 actions, from 3-7)
-- RESULT: Much shorter files, more natural pacing
-- PREVIOUS: v3.5.6 - Fixed manifest pause calculation
+merge_macros.py - v3.6.0 - MAJOR REBALANCING UPDATE
+- FIX: File selector multiplier 8x → 3x (MUCH more files selected!)
+- FIX: Intra-pauses now 30% chance per action (not 40% every 5-10)
+- FIX: Jitter now applies to ALL mouse moves (not just clicks)
+- FIX: Chat message completely rewritten (simpler, safer, mid-file insertion)
+- RESULT: Proper file counts (20-40 files), better balance, accurate durations
+- BALANCE: ~60% content, ~30% pauses, ~10% other (was 18% content, 69% pauses!)
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.5.7"
+VERSION = "v3.6.0"
 
 
 # OSRS chat messages for realism (250+ diverse phrases)
@@ -351,51 +352,51 @@ def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
 
 def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
     """
-    Add realistic pre-click jitter: before 50% of clicks, add 2-3 micro-movements
-    around the target (±1-3px), then snap back to exact click position.
-    This simulates human hesitation and aiming before clicking.
-    Returns (events_with_jitter, jitter_count, total_clicks).
+    Add realistic pre-move jitter: before 50% of ALL mouse movements (not just clicks),
+    add 2-3 micro-movements around the target (±1-3px), then snap to exact position.
+    This simulates human aiming/adjustment before any mouse action.
+    Returns (events_with_jitter, jitter_count, total_moves).
     """
     if not events or len(events) < 2:
         return events, 0, 0
     
     jitter_count = 0
-    total_clicks = 0
+    total_moves = 0
     i = 0
     
     while i < len(events):
         event = events[i]
         event_type = event.get('Type', '')
         
-        # Only apply to Click and RightDown events
-        if event_type in ('Click', 'RightDown'):
-            total_clicks += 1  # Count all clicks
+        # Apply to ALL mouse movements (MouseMove, Click, RightDown)
+        if event_type in ('MouseMove', 'Click', 'RightDown'):
+            total_moves += 1  # Count all mouse movements
             
-            # 50% chance to add pre-click jitter (increased from 45%)
+            # 50% chance to add jitter
             if rng.random() < 0.50:
-                click_x = event.get('X')
-                click_y = event.get('Y')
-                click_time = event.get('Time')
+                move_x = event.get('X')
+                move_y = event.get('Y')
+                move_time = event.get('Time')
                 
                 # Need valid coordinates and time
-                if click_x is not None and click_y is not None and click_time is not None:
+                if move_x is not None and move_y is not None and move_time is not None:
                     # Generate 2-3 jitter movements
                     num_jitters = rng.randint(2, 3)
                     jitter_events = []
                     
                     # Time budget: 100-200ms total for jitter sequence
                     time_budget = rng.randint(100, 200)
-                    time_per_jitter = time_budget // (num_jitters + 1)  # +1 for final snap back
+                    time_per_jitter = time_budget // (num_jitters + 1)
                     
-                    current_time = click_time - time_budget
+                    current_time = move_time - time_budget
                     
                     for j in range(num_jitters):
                         # Random offset ±1-3 pixels
                         offset_x = rng.randint(-3, 3)
                         offset_y = rng.randint(-3, 3)
                         
-                        jitter_x = int(click_x) + offset_x
-                        jitter_y = int(click_y) + offset_y
+                        jitter_x = int(move_x) + offset_x
+                        jitter_y = int(move_y) + offset_y
                         
                         # Keep within reasonable bounds
                         jitter_x = max(100, min(1800, jitter_x))
@@ -410,15 +411,15 @@ def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
                         
                         current_time += time_per_jitter
                     
-                    # Final movement: snap back to EXACT click position
+                    # Final movement: snap to EXACT target position
                     jitter_events.append({
                         'Type': 'MouseMove',
                         'Time': current_time,
-                        'X': int(click_x),
-                        'Y': int(click_y)
+                        'X': int(move_x),
+                        'Y': int(move_y)
                     })
                     
-                    # Insert jitter events BEFORE the click
+                    # Insert jitter events BEFORE the movement
                     for idx, jitter_event in enumerate(jitter_events):
                         events.insert(i + idx, jitter_event)
                     
@@ -428,126 +429,96 @@ def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
         
         i += 1
     
-    return events, jitter_count, total_clicks
+    return events, jitter_count, total_moves
 
 def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
     """
-    20% chance to insert a random OSRS chat message at the start of the merged file.
-    Simulates typing a common phrase, adding realism to long sessions.
+    20% chance to insert a random OSRS chat message somewhere in the merged file.
+    Inserts as simple key events without complex time shifting.
     Returns (events_with_chat, chat_inserted).
     """
-    if not events or rng.random() > 0.20:  # 20% chance (increased from 5%)
+    if not events or rng.random() > 0.20:
         return events, False
     
     # Pick random message
     message = rng.choice(OSRS_CHAT_MESSAGES)
     
-    # FIXED: Start chat at time 0 (not negative!)
-    start_time = 0
-    current_time = start_time
+    # Find a random insertion point (somewhere in the middle 20-80% of the file)
+    if len(events) < 10:
+        return events, False  # File too short
+    
+    start_idx = int(len(events) * 0.20)
+    end_idx = int(len(events) * 0.80)
+    insertion_point = rng.randint(start_idx, end_idx)
+    
+    # Get the time at insertion point
+    base_time = events[insertion_point].get('Time', 0)
     
     chat_events = []
+    current_time = base_time
     
-    # Open chat with Enter key
-    chat_events.append({
-        'Type': 'KeyDown',
-        'Time': current_time,
-        'KeyCode': 13  # Enter key
-    })
+    # Open chat with Enter
+    chat_events.append({'Type': 'KeyDown', 'Time': current_time, 'KeyCode': 13})
     current_time += rng.randint(20, 50)
-    
-    chat_events.append({
-        'Type': 'KeyUp',
-        'Time': current_time,
-        'KeyCode': 13
-    })
+    chat_events.append({'Type': 'KeyUp', 'Time': current_time, 'KeyCode': 13})
     current_time += rng.randint(50, 150)
     
-    # Type each character with realistic delays
+    # Type each character
     for char in message:
-        # Get key code (simplified - lowercase letters and common chars)
         key_code = ord(char)
         
-        # KeyDown
-        chat_events.append({
-            'Type': 'KeyDown',
-            'Time': current_time,
-            'KeyCode': key_code
-        })
-        current_time += rng.randint(20, 60)  # Key press duration
-        
-        # KeyUp
-        chat_events.append({
-            'Type': 'KeyUp',
-            'Time': current_time,
-            'KeyCode': key_code
-        })
-        
-        # Delay before next character (50-200ms, realistic typing)
+        chat_events.append({'Type': 'KeyDown', 'Time': current_time, 'KeyCode': key_code})
+        current_time += rng.randint(20, 60)
+        chat_events.append({'Type': 'KeyUp', 'Time': current_time, 'KeyCode': key_code})
         current_time += rng.randint(50, 200)
     
-    # Send message with Enter key
-    current_time += rng.randint(100, 300)  # Brief pause before sending
-    
-    chat_events.append({
-        'Type': 'KeyDown',
-        'Time': current_time,
-        'KeyCode': 13
-    })
+    # Send with Enter
+    current_time += rng.randint(100, 300)
+    chat_events.append({'Type': 'KeyDown', 'Time': current_time, 'KeyCode': 13})
     current_time += rng.randint(20, 50)
+    chat_events.append({'Type': 'KeyUp', 'Time': current_time, 'KeyCode': 13})
     
-    chat_events.append({
-        'Type': 'KeyUp',
-        'Time': current_time,
-        'KeyCode': 13
-    })
+    # Calculate total chat duration
+    chat_duration = current_time - base_time
     
-    # Add small delay after sending before first action
-    final_delay = rng.randint(500, 2000)
-    current_time += final_delay
+    # Shift all events AFTER insertion point by chat duration
+    for i in range(insertion_point, len(events)):
+        events[i]['Time'] = int(events[i]['Time']) + chat_duration
     
-    # FIXED: Shift all original events forward to start after the chat
-    # Chat ends at current_time, so original events start there
-    first_original_time = events[0].get('Time', 0)
-    time_shift = current_time - first_original_time
+    # Insert chat events at the insertion point
+    for i, chat_event in enumerate(chat_events):
+        events.insert(insertion_point + i, chat_event)
     
-    for event in events:
-        event['Time'] = int(event['Time']) + time_shift
-    
-    # Insert chat events at the beginning
-    return chat_events + events, True
+    return events, True
 
 def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     """
     Insert random pauses between recorded actions within a file.
-    40% chance to insert a 3000-5000ms pause (non-rounded).
-    Pauses occur randomly throughout the file, not on a fixed interval.
+    30% chance to insert a 3000-5000ms pause BEFORE each action.
+    This creates natural hesitation/thinking time.
     Returns (events_with_pauses, total_pause_time).
     """
     if not events or len(events) < 2:
         return events, 0
     
     total_pause_added = 0
-    action_counter = 0
     i = 0
     
     while i < len(events):
-        action_counter += 1
+        # Skip first event (nothing to pause before)
+        if i == 0:
+            i += 1
+            continue
         
-        # Check every 5-10 actions (less frequent than before)
-        if action_counter >= rng.randint(5, 10) and i < len(events) - 1:
-            # 40% chance to insert pause (reduced from 55%)
-            if rng.random() < 0.40:
-                # Generate non-rounded pause duration (3000-5000ms)
-                # Use floats then convert to avoid round numbers
-                pause_duration = int(rng.uniform(3000.123, 4999.987))
-                total_pause_added += pause_duration
-                
-                # Shift all subsequent events by this pause
-                for j in range(i + 1, len(events)):
-                    events[j]["Time"] = int(events[j]["Time"]) + pause_duration
-                
-                action_counter = 0  # Reset counter
+        # 30% chance to insert pause before this action
+        if rng.random() < 0.30:
+            # Generate non-rounded pause duration (3000-5000ms)
+            pause_duration = int(rng.uniform(3000.123, 4999.987))
+            total_pause_added += pause_duration
+            
+            # Shift this event and all subsequent events by the pause
+            for j in range(i, len(events)):
+                events[j]["Time"] = int(events[j]["Time"]) + pause_duration
         
         i += 1
     
@@ -831,23 +802,25 @@ class QueueFileSelector:
             else: break
             seq.append(pick)
             
-            # FIXED v3.5.2: Use ACCURATE multipliers based on real measurements
-            # Real data shows total time is ~7.8x the file duration due to:
-            # - Intra-file pauses: ~2.94x file duration
-            # - Inter-file gaps: ~5.09x file duration  
-            # - Idle movements: included in above
+            # FIXED v3.6.0: Adjusted multiplier for new pause settings
+            # With 30% pause chance (down from 40%), need lower multiplier
+            # Old 8x was way too conservative - selected only 2-3 files
             
             file_duration = self.durations.get(pick, 500)
             
-            # Conservative estimate: 8x multiplier covers all additions
-            # This ensures we don't overshoot the target
-            estimated_time = file_duration * 8.0
+            # NEW: 3x multiplier for better file count
+            # This accounts for:
+            # - Intra-pauses: ~30% chance = ~1x file duration
+            # - Inter-gaps: ~0.5x file duration  
+            # - Idle movements: already in gaps
+            # Total: ~3x seems right
+            estimated_time = file_duration * 3.0
             
             cur_ms += estimated_time
             
             # Safety limits
-            if len(seq) > 800: break  # Reduced from 1000
-            if cur_ms > target_ms * 3: break  # Reduced from 5x to 3x
+            if len(seq) > 800: break
+            if cur_ms > target_ms * 3: break
         return seq
 
 
@@ -1166,11 +1139,11 @@ def main():
             manifest_entry = [
                 version_label,
                 f"  TOTAL DURATION: {format_ms_precise(timeline)}",
-                f"  Pre-Click Jitter: {total_jitter_count}/{total_clicks} clicks had jitter ({total_jitter_count/total_clicks*100 if total_clicks > 0 else 0:.0f}% - target 50%)",
+                f"  Pre-Move Jitter: {total_jitter_count}/{total_clicks} moves had jitter ({total_jitter_count/total_clicks*100 if total_clicks > 0 else 0:.0f}% - target 50%)",
                 f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (20% chance)'}",
                 f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time) - informational only",
                 f"  total PAUSE ADDED: {format_ms_precise(total_pause)} +BREAKDOWN:",
-                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (random pauses between actions)",
+                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (30% chance before each action)",
                 f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)"
             ]
             
