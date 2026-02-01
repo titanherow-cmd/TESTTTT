@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.6.0 - MAJOR REBALANCING UPDATE
-- FIX: File selector multiplier 8x → 3x (MUCH more files selected!)
-- FIX: Intra-pauses now 30% chance per action (not 40% every 5-10)
-- FIX: Jitter now applies to ALL mouse moves (not just clicks)
-- FIX: Chat message completely rewritten (simpler, safer, mid-file insertion)
-- RESULT: Proper file counts (20-40 files), better balance, accurate durations
-- BALANCE: ~60% content, ~30% pauses, ~10% other (was 18% content, 69% pauses!)
+merge_macros.py - v3.6.1 - CRITICAL FIX: Intra-Pause Frequency
+- FIX: Intra-pause now every 10-20 events (not EVERY event!)
+- FIX: Multiplier adjusted to 2x (from 3x) for new pause frequency
+- PREVIOUS: v3.6.0 applied pause to every event = 177min files (5x too long!)
+- FEATURE: Jitter on all mouse moves, 30% pause chance, chat mid-file
+- BALANCE: Proper file counts, accurate durations
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.6.0"
+VERSION = "v3.6.1"
 
 
 # OSRS chat messages for realism (250+ diverse phrases)
@@ -494,31 +493,33 @@ def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
 def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     """
     Insert random pauses between recorded actions within a file.
-    30% chance to insert a 3000-5000ms pause BEFORE each action.
-    This creates natural hesitation/thinking time.
+    Every 10-20 events, 30% chance to insert a 3000-5000ms pause.
+    This creates natural breaks without overwhelming the file.
     Returns (events_with_pauses, total_pause_time).
     """
     if not events or len(events) < 2:
         return events, 0
     
     total_pause_added = 0
+    event_counter = 0
     i = 0
     
     while i < len(events):
-        # Skip first event (nothing to pause before)
-        if i == 0:
-            i += 1
-            continue
+        event_counter += 1
         
-        # 30% chance to insert pause before this action
-        if rng.random() < 0.30:
-            # Generate non-rounded pause duration (3000-5000ms)
-            pause_duration = int(rng.uniform(3000.123, 4999.987))
-            total_pause_added += pause_duration
-            
-            # Shift this event and all subsequent events by the pause
-            for j in range(i, len(events)):
-                events[j]["Time"] = int(events[j]["Time"]) + pause_duration
+        # Check every 10-20 events (much less frequent)
+        if event_counter >= rng.randint(10, 20) and i < len(events) - 1:
+            # 30% chance to insert pause
+            if rng.random() < 0.30:
+                # Generate non-rounded pause duration (3000-5000ms)
+                pause_duration = int(rng.uniform(3000.123, 4999.987))
+                total_pause_added += pause_duration
+                
+                # Shift all subsequent events by this pause
+                for j in range(i + 1, len(events)):
+                    events[j]["Time"] = int(events[j]["Time"]) + pause_duration
+                
+                event_counter = 0  # Reset counter
         
         i += 1
     
@@ -802,19 +803,17 @@ class QueueFileSelector:
             else: break
             seq.append(pick)
             
-            # FIXED v3.6.0: Adjusted multiplier for new pause settings
-            # With 30% pause chance (down from 40%), need lower multiplier
-            # Old 8x was way too conservative - selected only 2-3 files
+            # FIXED v3.6.1: Adjusted multiplier for realistic pause frequency
+            # Intra-pauses: 30% chance every 10-20 events (not every event!)
+            # This gives much more reasonable file counts and durations
             
             file_duration = self.durations.get(pick, 500)
             
-            # NEW: 3x multiplier for better file count
-            # This accounts for:
-            # - Intra-pauses: ~30% chance = ~1x file duration
-            # - Inter-gaps: ~0.5x file duration  
-            # - Idle movements: already in gaps
-            # Total: ~3x seems right
-            estimated_time = file_duration * 3.0
+            # Multiplier 2.0 accounts for:
+            # - Intra-pauses: ~15% of events get pause = ~0.6x duration
+            # - Inter-gaps: ~0.4x duration
+            # - Total: ~2x seems right for new settings
+            estimated_time = file_duration * 2.0
             
             cur_ms += estimated_time
             
@@ -1143,7 +1142,7 @@ def main():
                 f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (20% chance)'}",
                 f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time) - informational only",
                 f"  total PAUSE ADDED: {format_ms_precise(total_pause)} +BREAKDOWN:",
-                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (30% chance before each action)",
+                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (30% chance every 10-20 events)",
                 f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)"
             ]
             
