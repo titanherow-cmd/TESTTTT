@@ -1149,9 +1149,9 @@ def main():
             # Calculate pause time (idle movements are informational only)
             total_pause = total_intra_pauses + total_gaps
             
-            # Version label with TIME SENSITIVE indicator
+            # Version label
             if massive_pause_info:
-                version_label = f"Version {v_code} [INEFFICIENT] (Multiplier: x{mult}){ts_label}"
+                version_label = f"Version {v_code} [INEFFICIENT] (Multiplier: x{mult}):"
             else:
                 version_label = f"Version {v_code} (Multiplier: x{mult}):"
             
