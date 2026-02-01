@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.8.0 - Intra-Pause Per-File & Chat Fix
-- CHANGE: Intra-pause now 1-4 random pauses per file (not percentage based)
-- FIX: TIME SENSITIVE includes chat messages (only excludes new timing rules)
-- FIX: Manifest format matches requested structure
-- FIX: Chat message typing improved for better detection
+merge_macros.py - v3.9.0 - Major Feature Updates
+- NEW: Normal file pause (1-3 times, 1-3 min each) for normal files only
+- CHANGE: Inter-file gaps now 500-5000ms (from 1000-3000ms)
+- CHANGE: Intra-file pause duration now 1000-2000ms (from 3000-5000ms)
+- CHANGE: Jitter percentage now 20-45% random (from fixed 50%)
+- FIX: TIME SENSITIVE includes idle movements (doesn't affect timing)
+- FIX: TIME SENSITIVE file count issue
+- NEW: Manifest layout completely redesigned for clarity
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.8.0"
+VERSION = "v3.9.0"
 
 
 # OSRS chat messages for realism (250+ diverse phrases)
@@ -350,13 +353,16 @@ def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
 
 def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
     """
-    Add realistic pre-move jitter: before 50% of ALL mouse movements (not just clicks),
+    Add realistic pre-move jitter: before a random 20-45% of ALL mouse movements,
     add 2-3 micro-movements around the target (±1-3px), then snap to exact position.
-    This simulates human aiming/adjustment before any mouse action.
-    Returns (events_with_jitter, jitter_count, total_moves).
+    The percentage is randomly chosen per file (non-rounded).
+    Returns (events_with_jitter, jitter_count, total_moves, jitter_percentage).
     """
     if not events or len(events) < 2:
-        return events, 0, 0
+        return events, 0, 0, 0.0
+    
+    # Randomly choose jitter percentage for this file (20-45%, non-rounded)
+    jitter_percentage = rng.uniform(0.20, 0.45)
     
     jitter_count = 0
     total_moves = 0
@@ -368,35 +374,30 @@ def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
         
         # Apply to ALL mouse movements (MouseMove, Click, RightDown)
         if event_type in ('MouseMove', 'Click', 'RightDown'):
-            total_moves += 1  # Count all mouse movements
+            total_moves += 1
             
-            # 50% chance to add jitter
-            if rng.random() < 0.50:
+            # Random chance based on jitter_percentage
+            if rng.random() < jitter_percentage:
                 move_x = event.get('X')
                 move_y = event.get('Y')
                 move_time = event.get('Time')
                 
-                # Need valid coordinates and time
                 if move_x is not None and move_y is not None and move_time is not None:
-                    # Generate 2-3 jitter movements
                     num_jitters = rng.randint(2, 3)
                     jitter_events = []
                     
-                    # Time budget: 100-200ms total for jitter sequence
                     time_budget = rng.randint(100, 200)
                     time_per_jitter = time_budget // (num_jitters + 1)
                     
                     current_time = move_time - time_budget
                     
                     for j in range(num_jitters):
-                        # Random offset ±1-3 pixels
                         offset_x = rng.randint(-3, 3)
                         offset_y = rng.randint(-3, 3)
                         
                         jitter_x = int(move_x) + offset_x
                         jitter_y = int(move_y) + offset_y
                         
-                        # Keep within reasonable bounds
                         jitter_x = max(100, min(1800, jitter_x))
                         jitter_y = max(100, min(1000, jitter_y))
                         
@@ -417,17 +418,15 @@ def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
                         'Y': int(move_y)
                     })
                     
-                    # Insert jitter events BEFORE the movement
                     for idx, jitter_event in enumerate(jitter_events):
                         events.insert(i + idx, jitter_event)
                     
-                    # Adjust loop index to skip inserted events
                     i += len(jitter_events)
                     jitter_count += 1
         
         i += 1
     
-    return events, jitter_count, total_moves
+    return events, jitter_count, total_moves, jitter_percentage
 
 def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
     """
@@ -493,7 +492,7 @@ def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     """
     Insert random pauses before recorded actions.
     Each file gets 1-4 random pauses (randomly chosen per file).
-    Each pause is 3000-5000ms (non-rounded).
+    Each pause is 1000-2000ms (non-rounded).
     Returns (events_with_pauses, total_pause_time).
     """
     if not events or len(events) < 5:
@@ -503,21 +502,54 @@ def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     num_pauses = rng.randint(1, 4)
     
     # Randomly select which event indices will get pauses
-    # Skip first event and ensure we don't exceed event count
     max_idx = len(events) - 1
     if max_idx < num_pauses:
         num_pauses = max_idx
     
     # Select random unique indices (skip first event at index 0)
     pause_indices = rng.sample(range(1, len(events)), num_pauses)
-    pause_indices.sort()  # Sort to apply in order
+    pause_indices.sort()
     
     total_pause_added = 0
     
     # Apply pauses at selected indices
     for pause_idx in pause_indices:
-        # Generate non-rounded pause duration (3000-5000ms)
-        pause_duration = int(rng.uniform(3000.123, 4999.987))
+        # Generate non-rounded pause duration (1000-2000ms)
+        pause_duration = int(rng.uniform(1000.123, 1999.987))
+        total_pause_added += pause_duration
+        
+        # Shift this event and all subsequent events by the pause
+        for j in range(pause_idx, len(events)):
+            events[j]["Time"] = int(events[j]["Time"]) + pause_duration
+    
+    return events, total_pause_added
+
+def insert_normal_file_pauses(events: list, rng: random.Random) -> tuple:
+    """
+    Insert 1-3 random extended pauses (1-3 minutes each) for NORMAL files only.
+    These are inserted at random points throughout the merged file.
+    Returns (events_with_pauses, total_pause_time).
+    """
+    if not events or len(events) < 10:
+        return events, 0
+    
+    # Randomly decide how many extended pauses (1-3)
+    num_pauses = rng.randint(1, 3)
+    
+    # Select random unique indices
+    max_idx = len(events) - 1
+    if max_idx < num_pauses:
+        num_pauses = max_idx
+    
+    pause_indices = rng.sample(range(1, len(events)), num_pauses)
+    pause_indices.sort()
+    
+    total_pause_added = 0
+    
+    # Apply pauses at selected indices
+    for pause_idx in pause_indices:
+        # Generate non-rounded pause duration (1-3 minutes = 60000-180000ms)
+        pause_duration = int(rng.uniform(60000.123, 179999.987))
         total_pause_added += pause_duration
         
         # Shift this event and all subsequent events by the pause
@@ -1021,9 +1053,9 @@ def main():
             "=" * 40,
             f"Script Version: {VERSION}",
             f"Merged Bundle: merged_bundle_{args.bundle_id}",
-            f"Total Available Files: {len(data['files'])}",
-            f"Total Original Duration: {format_ms_precise(total_original_ms)}",
-            ""
+            f"Total Original Files: {len(data['files'])}",
+            f"Total Original Files Duration: {format_ms_precise(total_original_ms)}",
+            " "
         ]
         
         norm_v = args.versions
@@ -1039,13 +1071,15 @@ def main():
             else: mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             
             movement_percentage = rng.uniform(0.40, 0.50)
+            jitter_percentage = 0.0  # Will be set per file
             
             total_idle_movements = 0
-            total_intra_pauses = 0  # Track intra-file pauses separately
+            total_intra_pauses = 0
+            total_normal_pauses = 0  # NEW: Track normal file pauses
             total_gaps = 0
             total_afk_pool = 0
-            total_jitter_count = 0  # Track pre-click jitters
-            total_clicks = 0  # Track total clicks across all files
+            total_jitter_count = 0
+            total_clicks = 0
             file_segments = []
             massive_pause_info = None
             merged = []
@@ -1065,12 +1099,13 @@ def main():
                 # but INCLUDES chat messages (previously agreed)
                 is_time_sensitive = "time sensitive" in str(data["rel_path"]).lower() or "time-sensitive" in str(data["rel_path"]).lower()
                 
-                # Step 1: Add pre-move jitter (50% chance before moves)
+                # Step 1: Add pre-move jitter (random 20-45% of moves)
                 # TIME SENSITIVE: Skip jitter (NEW rule - excluded)
                 if not is_time_sensitive:
-                    raw_with_jitter, jitter_count, click_count = add_pre_click_jitter(raw, rng)
+                    raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
                     total_jitter_count += jitter_count
                     total_clicks += click_count
+                    jitter_percentage = jitter_pct  # Track the percentage used
                 else:
                     raw_with_jitter = raw
                     total_clicks += sum(1 for e in raw if e.get('Type') in ('MouseMove', 'Click', 'RightDown'))
@@ -1084,19 +1119,16 @@ def main():
                     raw_with_pauses = raw_with_jitter
                 
                 # Step 3: Insert idle mouse movements in gaps >= 5 seconds
-                # TIME SENSITIVE: Skip idle movements (previously agreed - excluded)
-                if not is_time_sensitive:
-                    raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
-                    total_idle_movements += idle_time
-                else:
-                    raw_with_movements = raw_with_pauses
+                # TIME SENSITIVE: NOW INCLUDED (doesn't affect timing, fills existing gaps)
+                raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
+                total_idle_movements += idle_time
                 
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
                 
-                # Inter-file gap: 1000-3000ms (non-rounded) × multiplier
+                # Inter-file gap: 500-5000ms (non-rounded) × multiplier
                 if i > 0:
-                    gap = int(rng.uniform(1000.123, 2999.987) * mult)
+                    gap = int(rng.uniform(500.123, 4999.987) * mult)
                 else:
                     gap = 0
                 timeline += gap
@@ -1126,7 +1158,14 @@ def main():
             if merged:
                 merged, chat_inserted = insert_osrs_chat_message(merged, rng)
                 if chat_inserted:
-                    # Update timeline to account for chat
+                    timeline = merged[-1]["Time"]
+            
+            # NEW: Normal File Pause (1-3 times, 1-3 min each)
+            # Only for NORMAL files (not inefficient, not TIME SENSITIVE)
+            if not is_inef and not is_time_sensitive and merged:
+                merged, normal_pause_time = insert_normal_file_pauses(merged, rng)
+                total_normal_pauses += normal_pause_time
+                if normal_pause_time > 0:
                     timeline = merged[-1]["Time"]
             
             if is_inef and not data["is_ts"] and len(merged) > 1:
@@ -1147,25 +1186,40 @@ def main():
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
             # Calculate pause time (idle movements are informational only)
-            total_pause = total_intra_pauses + total_gaps
+            total_pause = total_intra_pauses + total_gaps + total_normal_pauses
+            
+            # Determine file type
+            if is_time_sensitive:
+                file_type = "Time sensitive"
+            elif is_inef:
+                file_type = "Inefficient"
+            else:
+                file_type = "Normal"
             
             # Version label
-            if massive_pause_info:
-                version_label = f"Version {v_code} [INEFFICIENT] (Multiplier: x{mult}):"
-            else:
-                version_label = f"Version {v_code} (Multiplier: x{mult}):"
+            version_label = f"Version {v_code}   (Multiplier: x{mult}):"
             
             manifest_entry = [
                 version_label,
-                f"  TOTAL DURATION: {format_ms_precise(timeline)}",
-                f"  Pre-Move Jitter: {total_jitter_count}/{total_clicks} moves had jitter ({total_jitter_count/total_clicks*100 if total_clicks > 0 else 0:.0f}% - target 50%)",
-                f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (20% chance)'}",
-                f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time) - informational only",
-                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} +BREAKDOWN:",
-                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (1-4 pauses per file)",
-                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)"
+                f"FILE TYPE: {file_type}",
+                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)}",
+                f"       BREAKDOWN:   - Within original files pauses: {format_ms_precise(total_intra_pauses)}",
+                f"                    - Between original files pauses: {format_ms_precise(total_gaps)}"
             ]
             
+            # Add Normal File Pause if present
+            if total_normal_pauses > 0:
+                manifest_entry.append(f"                    - Normal file pause: {format_ms_precise(total_normal_pauses)}")
+            
+            # Add chat and idle info
+            manifest_entry.extend([
+                f"OSRS Chat Message: {'YES' if chat_inserted else 'NO'} ",
+                f"Idle Mouse Movements: {format_ms_precise(total_idle_movements)}",
+                f"Mouse Jitter: {int(jitter_percentage * 100)}%"
+            ])
+            
+            # Add files list
+            manifest_entry.append("")
             for seg in file_segments:
                 manifest_entry.append(f"  * {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
             
