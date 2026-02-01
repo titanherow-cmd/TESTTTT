@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.7.0 - TIME SENSITIVE & 5% Pause Update
-- NEW: TIME SENSITIVE folders exclude ALL pause rules (jitter, intra-pause, idle, chat)
-- NEW: Intra-pause is 5% chance before EACH action (from 30% batched)
-- NEW: File type system clarified:
-  * INEFFICIENT (¬¬): All pause rules + massive pause
-  * NORMAL: All pause rules
-  * TIME SENSITIVE: NO pause rules at all
-- FIX: Manifest cleaned up and reorganized
-- FIX: Chat message confirmed working (types message mid-file)
+merge_macros.py - v3.8.0 - Intra-Pause Per-File & Chat Fix
+- CHANGE: Intra-pause now 1-4 random pauses per file (not percentage based)
+- FIX: TIME SENSITIVE includes chat messages (only excludes new timing rules)
+- FIX: Manifest format matches requested structure
+- FIX: Chat message typing improved for better detection
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.7.0"
+VERSION = "v3.8.0"
 
 
 # OSRS chat messages for realism (250+ diverse phrases)
@@ -496,33 +492,37 @@ def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
 def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     """
     Insert random pauses before recorded actions.
-    5% chance to insert a 3000-5000ms pause BEFORE each recorded action.
-    This creates occasional natural hesitation without overwhelming the file.
+    Each file gets 1-4 random pauses (randomly chosen per file).
+    Each pause is 3000-5000ms (non-rounded).
     Returns (events_with_pauses, total_pause_time).
     """
-    if not events or len(events) < 2:
+    if not events or len(events) < 5:
         return events, 0
     
-    total_pause_added = 0
-    i = 0
+    # Randomly decide how many pauses for this file (1-4)
+    num_pauses = rng.randint(1, 4)
     
-    while i < len(events):
-        # Skip first event (nothing to pause before)
-        if i == 0:
-            i += 1
-            continue
+    # Randomly select which event indices will get pauses
+    # Skip first event and ensure we don't exceed event count
+    max_idx = len(events) - 1
+    if max_idx < num_pauses:
+        num_pauses = max_idx
+    
+    # Select random unique indices (skip first event at index 0)
+    pause_indices = rng.sample(range(1, len(events)), num_pauses)
+    pause_indices.sort()  # Sort to apply in order
+    
+    total_pause_added = 0
+    
+    # Apply pauses at selected indices
+    for pause_idx in pause_indices:
+        # Generate non-rounded pause duration (3000-5000ms)
+        pause_duration = int(rng.uniform(3000.123, 4999.987))
+        total_pause_added += pause_duration
         
-        # 5% chance to insert pause before this action
-        if rng.random() < 0.05:
-            # Generate non-rounded pause duration (3000-5000ms)
-            pause_duration = int(rng.uniform(3000.123, 4999.987))
-            total_pause_added += pause_duration
-            
-            # Shift this event and all subsequent events by the pause
-            for j in range(i, len(events)):
-                events[j]["Time"] = int(events[j]["Time"]) + pause_duration
-        
-        i += 1
+        # Shift this event and all subsequent events by the pause
+        for j in range(pause_idx, len(events)):
+            events[j]["Time"] = int(events[j]["Time"]) + pause_duration
     
     return events, total_pause_added
 
@@ -1016,18 +1016,13 @@ def main():
         
         total_original_ms = sum(durations_cache.get(f, 0) for f in data["files"])
         
-        # Check if TIME SENSITIVE folder
-        is_time_sensitive = "time sensitive" in str(original_rel_path).lower() or "time-sensitive" in str(original_rel_path).lower()
-        ts_label = " [TIME SENSITIVE - Pause rules excluded]" if is_time_sensitive else ""
-        
         manifest = [
-            f"MANIFEST FOR FOLDER: {original_rel_path}{ts_label}",
+            f"MANIFEST FOR FOLDER: {original_rel_path}",
             "=" * 40,
             f"Script Version: {VERSION}",
             f"Merged Bundle: merged_bundle_{args.bundle_id}",
             f"Total Available Files: {len(data['files'])}",
             f"Total Original Duration: {format_ms_precise(total_original_ms)}",
-            "",
             ""
         ]
         
@@ -1065,12 +1060,13 @@ def main():
                 raw = load_json_events(p)
                 if not raw: continue
                 
-                # Check if this is TIME SENSITIVE folder (skip most pause rules)
-                # TIME SENSITIVE can be spelled many ways: "time sensitive", "TIME SENSITIVE", "time-sensitive", etc.
+                # Check if this is TIME SENSITIVE folder
+                # TIME SENSITIVE excludes only NEW pause rules that affect timing
+                # but INCLUDES chat messages (previously agreed)
                 is_time_sensitive = "time sensitive" in str(data["rel_path"]).lower() or "time-sensitive" in str(data["rel_path"]).lower()
                 
                 # Step 1: Add pre-move jitter (50% chance before moves)
-                # TIME SENSITIVE: Skip jitter
+                # TIME SENSITIVE: Skip jitter (NEW rule - excluded)
                 if not is_time_sensitive:
                     raw_with_jitter, jitter_count, click_count = add_pre_click_jitter(raw, rng)
                     total_jitter_count += jitter_count
@@ -1080,9 +1076,7 @@ def main():
                     total_clicks += sum(1 for e in raw if e.get('Type') in ('MouseMove', 'Click', 'RightDown'))
                 
                 # Step 2: Insert random intra-file pauses between actions
-                # TIME SENSITIVE: Skip intra-pauses
-                # INEFFICIENT: Apply pauses normally
-                # NORMAL: Apply pauses normally
+                # TIME SENSITIVE: Skip intra-pauses (NEW rule - excluded)
                 if not is_time_sensitive:
                     raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
                     total_intra_pauses += intra_pause_time
@@ -1090,7 +1084,7 @@ def main():
                     raw_with_pauses = raw_with_jitter
                 
                 # Step 3: Insert idle mouse movements in gaps >= 5 seconds
-                # TIME SENSITIVE: Skip idle movements
+                # TIME SENSITIVE: Skip idle movements (previously agreed - excluded)
                 if not is_time_sensitive:
                     raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
                     total_idle_movements += idle_time
@@ -1127,9 +1121,9 @@ def main():
             
             total_afk_pool = total_idle_movements
             
-            # Insert OSRS chat message (20% chance) - Skip for TIME SENSITIVE
+            # Insert OSRS chat message (20% chance) - INCLUDED in TIME SENSITIVE
             chat_inserted = False
-            if merged and not is_time_sensitive:
+            if merged:
                 merged, chat_inserted = insert_osrs_chat_message(merged, rng)
                 if chat_inserted:
                     # Update timeline to account for chat
@@ -1159,52 +1153,23 @@ def main():
             if massive_pause_info:
                 version_label = f"Version {v_code} [INEFFICIENT] (Multiplier: x{mult}){ts_label}"
             else:
-                version_label = f"Version {v_code} (Multiplier: x{mult}){ts_label}"
+                version_label = f"Version {v_code} (Multiplier: x{mult}):"
             
-            # Clean, organized manifest entry
             manifest_entry = [
-                "",  # Blank line before version
                 version_label,
-                f"  Duration: {format_ms_precise(timeline)}",
-                ""  # Separator
+                f"  TOTAL DURATION: {format_ms_precise(timeline)}",
+                f"  Pre-Move Jitter: {total_jitter_count}/{total_clicks} moves had jitter ({total_jitter_count/total_clicks*100 if total_clicks > 0 else 0:.0f}% - target 50%)",
+                f"  OSRS Chat Message: {'Yes - Random message inserted' if chat_inserted else 'No (20% chance)'}",
+                f"  Idle Mouse Movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of idle time) - informational only",
+                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} +BREAKDOWN:",
+                f"    - Intra-file Pauses: {format_ms_precise(total_intra_pauses)} (1-4 pauses per file)",
+                f"    - Inter-file Gaps: {format_ms_precise(total_gaps)} (gaps between files)"
             ]
             
-            # Pause Rules Applied (skip if TIME SENSITIVE)
-            if not is_time_sensitive:
-                manifest_entry.extend([
-                    "  Pause Rules:",
-                    f"    • Intra-file: {format_ms_precise(total_intra_pauses)} (5% chance before each action)",
-                    f"    • Inter-file gaps: {format_ms_precise(total_gaps)}",
-                    f"    • Idle movements: {format_ms_precise(total_idle_movements)} ({int(movement_percentage*100)}% of gaps ≥5s)",
-                    f"    • Total added: {format_ms_precise(total_pause)}",
-                    ""
-                ])
-                
-                # Anti-Detection Features
-                manifest_entry.extend([
-                    "  Anti-Detection:",
-                    f"    • Pre-move jitter: {total_jitter_count}/{total_clicks} moves ({total_jitter_count/total_clicks*100 if total_clicks > 0 else 0:.0f}%)",
-                    f"    • Chat message: {'Yes' if chat_inserted else 'No'}",
-                    ""
-                ])
-                
-                if massive_pause_info:
-                    manifest_entry.append(f"    • {massive_pause_info}")
-                    manifest_entry.append("")
-            else:
-                manifest_entry.extend([
-                    "  TIME SENSITIVE - All pause rules excluded for accuracy",
-                    ""
-                ])
+            for seg in file_segments:
+                manifest_entry.append(f"  * {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
             
-            # Files merged
-            manifest_entry.append("  Files:")
-            
-            for idx, seg in enumerate(file_segments):
-                bullet = "*" if idx < 11 else "-"
-                manifest_entry.append(f"  {bullet} {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
-            
-            manifest_entry.append("-" * 30)
+            manifest_entry.append("------------------------------")
             manifest.append("\n".join(manifest_entry))
 
         (out_f / f"!_MANIFEST_{folder_number}_!.txt").write_text("\n".join(manifest))
