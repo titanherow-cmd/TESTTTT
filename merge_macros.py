@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.9.0 - Major Feature Updates
-- NEW: Normal file pause (1-3 times, 1-3 min each) for normal files only
-- CHANGE: Inter-file gaps now 500-5000ms (from 1000-3000ms)
-- CHANGE: Intra-file pause duration now 1000-2000ms (from 3000-5000ms)
-- CHANGE: Jitter percentage now 20-45% random (from fixed 50%)
-- FIX: TIME SENSITIVE includes idle movements (doesn't affect timing)
-- FIX: TIME SENSITIVE file count issue
-- NEW: Manifest layout completely redesigned for clarity
+merge_macros.py - v3.9.1 - CRITICAL FIX: Problematic Hotkeys
+- FIX: Filters out HOME, END, PAGE UP/DOWN, ESC, PAUSE, PRINT SCREEN keys
+- ISSUE: END key (KeyCode 35) was causing macros to stop at ~9 minutes
+- CAUSE: Original files contained END key presses that trigger macro player stop
+- SOLUTION: All problematic keys now removed during file loading
+- Previous: v3.9.0 features (Normal File Pause, new manifest, updated timings)
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.9.0"
+VERSION = "v3.9.1"
 
 
 # OSRS chat messages for realism (250+ diverse phrases)
@@ -558,6 +556,26 @@ def insert_normal_file_pauses(events: list, rng: random.Random) -> tuple:
     
     return events, total_pause_added
 
+def filter_problematic_keys(events: list) -> list:
+    """
+    Remove problematic key events that could trigger macro player hotkeys.
+    Filters out: HOME (36), END (35), PAGE UP (33), PAGE DOWN (34), 
+    ESC (27), PAUSE/BREAK (19), PRINT SCREEN (44)
+    """
+    problematic_keycodes = {27, 19, 33, 34, 35, 36, 44}
+    
+    filtered = []
+    for event in events:
+        # Skip KeyDown/KeyUp events with problematic keycodes
+        if event.get('Type') in ['KeyDown', 'KeyUp']:
+            keycode = event.get('KeyCode')
+            if keycode in problematic_keycodes:
+                continue  # Skip this event
+        
+        filtered.append(event)
+    
+    return filtered
+
 def insert_idle_mouse_movements(events, rng, movement_percentage):
     """
     Insert realistic human-like mouse movements during idle periods (gaps > 5 seconds).
@@ -1094,9 +1112,12 @@ def main():
                 raw = load_json_events(p)
                 if not raw: continue
                 
+                # CRITICAL: Filter out problematic keys that could stop macro playback
+                # Remove HOME, END, PAGE UP/DOWN, ESC, PAUSE, PRINT SCREEN
+                raw = filter_problematic_keys(raw)
+                if not raw: continue
+                
                 # Check if this is TIME SENSITIVE folder
-                # TIME SENSITIVE excludes only NEW pause rules that affect timing
-                # but INCLUDES chat messages (previously agreed)
                 is_time_sensitive = "time sensitive" in str(data["rel_path"]).lower() or "time-sensitive" in str(data["rel_path"]).lower()
                 
                 # Step 1: Add pre-move jitter (random 20-45% of moves)
