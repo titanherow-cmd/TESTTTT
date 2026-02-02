@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.10.1 - CRITICAL FIX: NameError
-- FIX: is_time_sensitive parameter error in get_sequence()
-- Previous: v3.10.0 (Chat inserts, file selection fix)
+merge_macros.py - v3.11.0 - Multiplier Fix & Chat Between Files
+- FIX: Multiplier reduced (1.8x→1.3x normal, 1.1x→1.05x TIME SENSITIVE)
+- CHANGE: Chat inserts between files (not within), queue prevents repetition
+- NEW: Manifest shows original pause times before multiplier
+- NEW: Chat files highlighted with ****** in manifest
+- FIX: Always show Normal File Pause in manifest (even if 0s)
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.10.1"
+VERSION = "v3.11.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -717,21 +720,19 @@ class QueueFileSelector:
             
             file_duration = self.durations.get(pick, 500)
             
-            # File selector multiplier depends on file type
-            # TIME SENSITIVE: 1.1x (minimal pauses, mostly original content)
-            # NORMAL/INEFFICIENT: 1.8x (includes intra-pauses, inter-gaps, normal pauses)
-            
-            file_duration = self.durations.get(pick, 500)
+            # File selector multiplier - CRITICAL for accurate duration
+            # Based on real data: 23min output for 35min target = 66% accuracy
+            # Need to select MORE files = LOWER multiplier
             
             if is_time_sensitive:
-                # TIME SENSITIVE: only has inter-gaps (500-5000ms), idle movements
-                # Multiplier 1.1x is closer to actual (mostly original content)
-                estimated_time = file_duration * 1.1
+                # TIME SENSITIVE: minimal additions (inter-gaps, idle)
+                # Multiplier 1.05x (was 1.1x, still too high)
+                estimated_time = file_duration * 1.05
             else:
-                # NORMAL/INEFFICIENT: has intra-pauses (1-4 per file, 1-2s each)
-                # plus inter-gaps, plus normal file pauses (1-3 min each)
-                # Multiplier 1.8x accounts for these additions
-                estimated_time = file_duration * 1.8
+                # NORMAL/INEFFICIENT: all pause types active
+                # Multiplier 1.3x (was 1.8x, way too high)
+                # This ensures we select enough files to reach target
+                estimated_time = file_duration * 1.3
             
             cur_ms += estimated_time
             
@@ -984,17 +985,62 @@ def main():
             if not paths:
                 continue
             
+            # Chat file queue system - prevents repetition
+            chat_queue = list(chat_files) if chat_files else []
+            if chat_queue:
+                rng.shuffle(chat_queue)  # Initial shuffle
+            chat_used_count = 0
+            chat_segments = []  # Track which files are chat
+            
             for i, p in enumerate(paths):
                 raw = load_json_events(p)
                 if not raw: continue
                 
-                # CRITICAL: Filter out problematic keys that could stop macro playback
-                # Remove HOME, END, PAGE UP/DOWN, ESC, PAUSE, PRINT SCREEN
+                # CRITICAL: Filter out problematic keys
                 raw = filter_problematic_keys(raw)
                 if not raw: continue
                 
                 # Check if this is TIME SENSITIVE folder
                 is_time_sensitive = "time sensitive" in str(data["rel_path"]).lower() or "time-sensitive" in str(data["rel_path"]).lower()
+                
+                # INSERT CHAT BETWEEN FILES (20% chance, not first file)
+                # Chat goes BEFORE current file is added
+                if i > 0 and chat_queue and rng.random() < 0.20:
+                    # Pop from front of queue
+                    chat_file = chat_queue.pop(0)
+                    
+                    try:
+                        chat_events = load_json_events(chat_file)
+                        if chat_events:
+                            chat_events = filter_problematic_keys(chat_events)
+                            if chat_events:
+                                # Normalize chat to start at current timeline
+                                chat_start = min(e.get('Time', 0) for e in chat_events)
+                                for e in chat_events:
+                                    e['Time'] = e['Time'] - chat_start + timeline
+                                
+                                # Add chat to merged
+                                chat_file_start_idx = len(merged)
+                                for e in chat_events:
+                                    merged.append(e)
+                                
+                                timeline = merged[-1]["Time"] if merged else 0
+                                
+                                # Track chat file
+                                file_segments.append({
+                                    "name": chat_file.name,
+                                    "end_time": timeline,
+                                    "start_idx": chat_file_start_idx,
+                                    "end_idx": len(merged) - 1,
+                                    "is_chat": True  # Mark as chat
+                                })
+                                chat_used_count += 1
+                                
+                                # Move used chat to back of queue
+                                chat_queue.append(chat_file)
+                    except Exception as e:
+                        print(f"  ⚠️ Error loading chat {chat_file.name}: {e}")
+                        chat_queue.append(chat_file)  # Return to queue anyway
                 
                 # Step 1: Add pre-move jitter (random 20-45% of moves)
                 # TIME SENSITIVE: Skip jitter (NEW rule - excluded)
@@ -1040,22 +1086,17 @@ def main():
                     merged.append(ne)
                 
                 timeline = merged[-1]["Time"]
-                file_end_idx = len(merged) - 1  # Track where this file ends
+                file_end_idx = len(merged) - 1
                 file_segments.append({
                     "name": p.name, 
                     "end_time": timeline,
                     "start_idx": file_start_idx,
-                    "end_idx": file_end_idx
+                    "end_idx": file_end_idx,
+                    "is_chat": False  # Regular file, not chat
                 })
             
             total_afk_pool = total_idle_movements
-            
-            # Insert chat message from 'chat inserts' folder (20% chance)
-            chat_inserted = False
-            if merged and chat_files:
-                merged, chat_inserted = insert_chat_from_file(merged, rng, chat_files)
-                if chat_inserted:
-                    timeline = merged[-1]["Time"]
+            chat_inserted = (chat_used_count > 0)  # Track if any chat was used
             
             # NEW: Normal File Pause (1-3 times, 1-3 min each)
             # Only for NORMAL files (not inefficient, not TIME SENSITIVE)
@@ -1082,7 +1123,12 @@ def main():
             fname = f"{'¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
-            # Calculate pause time (idle movements are informational only)
+            # Calculate original pause times (before multiplier)
+            original_intra = total_intra_pauses
+            original_inter = int(total_gaps / mult) if mult > 0 else total_gaps
+            original_normal = total_normal_pauses
+            
+            # Calculate total pause (after multiplier applied)
             total_pause = total_intra_pauses + total_gaps + total_normal_pauses
             
             # Determine file type
@@ -1093,22 +1139,24 @@ def main():
             else:
                 file_type = "Normal"
             
-            # Version label
+            # Version label with separator line
             version_label = f"Version {v_code}   (Multiplier: x{mult}):"
             
             manifest_entry = [
+                "=" * 40,
+                " ",
                 version_label,
                 f"FILE TYPE: {file_type}",
                 f"  Total PAUSE ADDED: {format_ms_precise(total_pause)}",
-                f"       BREAKDOWN:   - Within original files pauses: {format_ms_precise(total_intra_pauses)}",
-                f"                    - Between original files pauses: {format_ms_precise(total_gaps)}"
+                f"       BREAKDOWN:   - Within original files pauses: {format_ms_precise(original_intra)}",
+                f"                    - Between original files pauses: {format_ms_precise(original_inter)}"
             ]
             
             # Always show Normal File Pause for NORMAL files (even if 0)
             if not is_inef and not is_time_sensitive:
-                manifest_entry.append(f"                    - Normal file pause: {format_ms_precise(total_normal_pauses)}")
-            elif total_normal_pauses > 0:  # Show for other types only if > 0
-                manifest_entry.append(f"                    - Normal file pause: {format_ms_precise(total_normal_pauses)}")
+                manifest_entry.append(f"                    - Normal file pause: {format_ms_precise(original_normal)}")
+            elif total_normal_pauses > 0:
+                manifest_entry.append(f"                    - Normal file pause: {format_ms_precise(original_normal)}")
             
             # Add chat and idle info
             manifest_entry.extend([
@@ -1117,10 +1165,14 @@ def main():
                 f"Mouse Jitter: {int(jitter_percentage * 100)}%"
             ])
             
-            # Add files list
+            # Add files list with chat highlighting
             manifest_entry.append("")
             for seg in file_segments:
-                manifest_entry.append(f"  * {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
+                if seg.get("is_chat", False):
+                    # Highlight chat files with ******
+                    manifest_entry.append(f"  ****** {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
+                else:
+                    manifest_entry.append(f"  * {seg['name']} (Ends at {format_ms_precise(seg['end_time'])})")
             
             manifest_entry.append("------------------------------")
             manifest.append("\n".join(manifest_entry))
