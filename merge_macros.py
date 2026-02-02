@@ -1,160 +1,21 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.9.1 - CRITICAL FIX: Problematic Hotkeys
-- FIX: Filters out HOME, END, PAGE UP/DOWN, ESC, PAUSE, PRINT SCREEN keys
-- ISSUE: END key (KeyCode 35) was causing macros to stop at ~9 minutes
-- CAUSE: Original files contained END key presses that trigger macro player stop
-- SOLUTION: All problematic keys now removed during file loading
-- Previous: v3.9.0 features (Normal File Pause, new manifest, updated timings)
+merge_macros.py - v3.10.0 - Chat Inserts & File Selection Fix  
+- NEW: Chat messages loaded from 'chat inserts' folder (recorded .json files)
+- FIX: TIME SENSITIVE uses 1.1x multiplier (was 1.5x) → more files selected
+- FIX: NORMAL/INEFFICIENT uses 1.8x multiplier for better accuracy
+- FIX: Normal File Pause always shows in manifest for normal files
+- REMOVED: Old hard-coded OSRS_CHAT_MESSAGES list (326 messages)
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.9.1"
+VERSION = "v3.10.0"
 
 
-# OSRS chat messages for realism (250+ diverse phrases)
-OSRS_CHAT_MESSAGES = [
-    # === OSRS GAME SPECIFIC ===
-    # Levels/Stats Questions
-    "what lvl fishing?", "whats ur mining lvl", "combat lvl?", "stats?", 
-    "total level?", "how long for 99?", "what cb lvl?", "ur cooking level?",
-    "str lvl?", "magic level?", "prayer lvl?", "slayer?",
-    
-    # Quest Questions  
-    "doing rfd?", "finished ds2 yet?", "what quest u doing", "need quest help?",
-    "sote done?", "got qpc?", "how many qp", "quest worth it?",
-    
-    # Noob Questions
-    "how do i get there", "where is ge", "how to make money", "best weapon for my lvl",
-    "how to train fast", "is this members only", "whats bis", "how does this work",
-    "im lost lol", "first time playing", "just started", "any tips for noobs",
-    
-    # Skilling/Training
-    "afk spot?", "good money maker?", "where u training?", "how much gp/hr",
-    "worth it?", "better than mlm?", "xp rates?", "fastest method?",
-    
-    # Items/Economy
-    "price check?", "how much is fury", "worth upgrading?", "bis for this?",
-    "ge price?", "merching?", "crashed?", "flipping?", "lost bank lol",
-    
-    # PvM/Combat
-    "solo or team?", "kc?", "got pet yet?", "drop rate?",
-    "doing slayer?", "which boss?", "task?", "easy boss?",
-    
-    # World/Location
-    "crowded?", "this world busy", "hop?", "empty world?",
-    "better spot?", "where is this", "tele?", "f2p world?",
-    
-    # Progress/Achievement  
-    "just got 99", "first time here", "finally completed", "took forever",
-    "bad rng", "got lucky", "spooned lol", "gz me",
-    
-    # === CASUAL CHAT/REACTIONS ===
-    # One Word/Short Reactions
-    "nice", "lol", "lmao", "bruh", "oof", "rip", "yikes", "sheesh",
-    "fr", "ngl", "tbh", "icl", "damn", "omg", "wow", "what",
-    "bro", "dude", "man", "yo", "ayy", "ayo", "yoo", "hey",
-    
-    # Exclamations/Expressions
-    "oh boy", "oh no", "oh god", "oh damn", "lets go", "there we go",
-    "here we go again", "not again", "why tho", "makes sense", "fair enough",
-    "i guess", "whatever", "meh", "eh", "huh", "hmm", "idk man",
-    
-    # Brain Rot / Meme Speak
-    "6 7 6 7 6 7", "caught in 4k", "no cap", "its giving", "slay",
-    "ate", "serve", "literally me", "real", "so true", "based",
-    "cringe", "mid", "L", "W", "ratio", "touch grass",
-    "skill issue", "cope", "mald", "gamer moment", "ez clap",
-    "gg ez", "diff", "built different", "simply better", "too easy",
-    
-    # Tired/Bored Comments
-    "im so bored", "this is boring", "so tired rn", "need coffee",
-    "been here for hours", "cant feel my hands", "eyes hurt", "so sleepy",
-    "gonna fall asleep", "zzzz", "wake me up", "end me",
-    
-    # Funny One-Liners
-    "this game lol", "why am i here", "what am i doing with my life",
-    "i need a life", "touch grass challenge", "grass is a myth",
-    "sunlight is overrated", "sleep is for the weak", "one more hour",
-    "just 5 more minutes", "ill stop soon", "yeah right",
-    
-    # Sarcastic/Cynical
-    "this is fine", "totally worth it", "best game ever", "10/10 gameplay",
-    "riveting content", "peak gaming", "what could go wrong", "seems legit",
-    "totally not addicted", "healthy lifestyle", "productive", "time well spent",
-    
-    # Self Commentary  
-    "why did i click that", "misclick", "my bad", "oops", "fail",
-    "i messed up", "wrong spot", "forgot to bank", "ran out of food",
-    "died lol", "rip me", "should have known", "classic me",
-    
-    # Observational
-    "this guy is just...", "look at this dude", "bro what", "no way",
-    "are you serious", "tell me why", "explain pls", "how even",
-    "that shouldnt work", "thats wild", "insane", "crazy",
-    
-    # === GENERAL TOPICS ===
-    # TV Shows/Movies
-    "anybody watching breaking bad", "game of thrones was good", "stranger things new season",
-    "the office is peak", "watching netflix rn", "good show recommendations?",
-    "just finished watching X", "that show is trash", "overrated show",
-    
-    # Music
-    "music recommendations?", "listening to spotify", "good playlist?",
-    "this song slaps", "music taste check", "whats everyone listening to",
-    
-    # Food/Drinks
-    "pizza time", "ordering food", "starving rn", "getting snacks",
-    "coffee break", "energy drink time", "need food", "eating rn",
-    
-    # Weather/Time
-    "its so hot", "freezing here", "nice weather", "raining outside",
-    "what time is it", "so late rn", "pulling an all nighter",
-    "sun is up already", "cant believe its morning",
-    
-    # Weekend/Days
-    "its friday!", "weekend vibes", "hate mondays", "long week",
-    "finally weekend", "back to work tomorrow", "no work today",
-    
-    # Sleep Schedule  
-    "sleep schedule ruined", "havent slept", "all nighter again",
-    "gonna fix sleep schedule", "totally waking up early tomorrow",
-    "5am already?", "sun is coming up", "birds are chirping",
-    
-    # === SOCIAL/INTERACTIVE ===
-    # Greetings
-    "morning", "gn everyone", "later guys", "cya", "peace",
-    "im out", "gtg", "afk", "back", "hello",
-    
-    # Thanks/Positive  
-    "ty", "thanks", "appreciate it", "helpful", "gz", "gratz",
-    "nice one", "good job", "well done", "impressive", "respect",
-    
-    # Questions to Others
-    "how long you been playing", "what you doing", "grinding what",
-    "hows it going", "whats good", "sup", "you good?", "all good?",
-    
-    # Agreeing/Relating
-    "same", "me too", "relatable", "felt that", "so true", "exactly",
-    "big mood", "mood", "same energy", "literally", "fr fr",
-    
-    # === RANDOM FILLER ===
-    # Random Observations
-    "interesting", "noted", "i see", "makes sense", "understandable",
-    "cool cool", "alright", "sure", "okay then", "if you say so",
-    
-    # Confusion
-    "wait what", "come again?", "huh?", "confused", "dont get it",
-    "elaborate pls", "context?", "why", "how", "what happened",
-    
-    # Misc Short Phrases
-    "gg", "gl", "gl hf", "wp", "nt", "mb", "np", "idc",
-    "idm", "idk", "tbf", "imo", "fyi", "btw", "rn", "asap",
-]
-
+# Chat inserts are loaded from 'chat inserts' folder at runtime
 def load_json_events(path: Path):
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -426,65 +287,61 @@ def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
     
     return events, jitter_count, total_moves, jitter_percentage
 
-def insert_osrs_chat_message(events: list, rng: random.Random) -> tuple:
+def insert_chat_from_file(events: list, rng: random.Random, chat_files: list) -> tuple:
     """
-    20% chance to insert a random OSRS chat message somewhere in the merged file.
-    Inserts as simple key events without complex time shifting.
+    20% chance to insert a random chat message from 'chat inserts' folder.
+    Loads a recorded .json file and inserts it at a random point.
     Returns (events_with_chat, chat_inserted).
     """
-    if not events or rng.random() > 0.20:
+    if not events or not chat_files or rng.random() > 0.20:
         return events, False
     
-    # Pick random message
-    message = rng.choice(OSRS_CHAT_MESSAGES)
+    # Pick random chat file
+    chat_file = rng.choice(chat_files)
     
-    # Find a random insertion point (somewhere in the middle 20-80% of the file)
-    if len(events) < 10:
-        return events, False  # File too short
-    
-    start_idx = int(len(events) * 0.20)
-    end_idx = int(len(events) * 0.80)
-    insertion_point = rng.randint(start_idx, end_idx)
-    
-    # Get the time at insertion point
-    base_time = events[insertion_point].get('Time', 0)
-    
-    chat_events = []
-    current_time = base_time
-    
-    # Open chat with Enter
-    chat_events.append({'Type': 'KeyDown', 'Time': current_time, 'KeyCode': 13})
-    current_time += rng.randint(20, 50)
-    chat_events.append({'Type': 'KeyUp', 'Time': current_time, 'KeyCode': 13})
-    current_time += rng.randint(50, 150)
-    
-    # Type each character
-    for char in message:
-        key_code = ord(char)
+    try:
+        # Load chat events
+        chat_events = load_json_events(chat_file)
+        if not chat_events:
+            return events, False
         
-        chat_events.append({'Type': 'KeyDown', 'Time': current_time, 'KeyCode': key_code})
-        current_time += rng.randint(20, 60)
-        chat_events.append({'Type': 'KeyUp', 'Time': current_time, 'KeyCode': key_code})
-        current_time += rng.randint(50, 200)
-    
-    # Send with Enter
-    current_time += rng.randint(100, 300)
-    chat_events.append({'Type': 'KeyDown', 'Time': current_time, 'KeyCode': 13})
-    current_time += rng.randint(20, 50)
-    chat_events.append({'Type': 'KeyUp', 'Time': current_time, 'KeyCode': 13})
-    
-    # Calculate total chat duration
-    chat_duration = current_time - base_time
-    
-    # Shift all events AFTER insertion point by chat duration
-    for i in range(insertion_point, len(events)):
-        events[i]['Time'] = int(events[i]['Time']) + chat_duration
-    
-    # Insert chat events at the insertion point
-    for i, chat_event in enumerate(chat_events):
-        events.insert(insertion_point + i, chat_event)
-    
-    return events, True
+        # Filter problematic keys from chat
+        chat_events = filter_problematic_keys(chat_events)
+        if not chat_events:
+            return events, False
+        
+        # Find insertion point (20-80% through file)
+        if len(events) < 10:
+            return events, False
+        
+        start_idx = int(len(events) * 0.20)
+        end_idx = int(len(events) * 0.80)
+        insertion_point = rng.randint(start_idx, end_idx)
+        
+        # Get time at insertion point
+        base_time = events[insertion_point].get('Time', 0)
+        
+        # Normalize chat events to start at base_time
+        chat_start_time = min(e.get('Time', 0) for e in chat_events)
+        for event in chat_events:
+            event['Time'] = event['Time'] - chat_start_time + base_time
+        
+        # Calculate chat duration
+        chat_duration = max(e.get('Time', 0) for e in chat_events) - base_time
+        
+        # Shift all events AFTER insertion point
+        for i in range(insertion_point, len(events)):
+            events[i]['Time'] = int(events[i]['Time']) + chat_duration
+        
+        # Insert chat events
+        for i, chat_event in enumerate(chat_events):
+            events.insert(insertion_point + i, chat_event)
+        
+        return events, True
+        
+    except Exception as e:
+        print(f"  ⚠️ Error loading chat file {chat_file.name}: {e}")
+        return events, False
 
 def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
     """
@@ -863,11 +720,21 @@ class QueueFileSelector:
             
             file_duration = self.durations.get(pick, 500)
             
-            # Multiplier 1.5x accounts for:
-            # - Intra-pauses: 5% of events = ~0.25x duration
-            # - Inter-gaps: ~0.25x duration
-            # - Total: ~1.5x is reasonable
-            estimated_time = file_duration * 1.5
+            # File selector multiplier depends on file type
+            # TIME SENSITIVE: 1.1x (minimal pauses, mostly original content)
+            # NORMAL/INEFFICIENT: 1.8x (includes intra-pauses, inter-gaps, normal pauses)
+            
+            file_duration = self.durations.get(pick, 500)
+            
+            if is_time_sensitive:
+                # TIME SENSITIVE: only has inter-gaps (500-5000ms), idle movements
+                # Multiplier 1.1x is closer to actual (mostly original content)
+                estimated_time = file_duration * 1.1
+            else:
+                # NORMAL/INEFFICIENT: has intra-pauses (1-4 per file, 1-2s each)
+                # plus inter-gaps, plus normal file pauses (1-3 min each)
+                # Multiplier 1.8x accounts for these additions
+                estimated_time = file_duration * 1.8
             
             cur_ms += estimated_time
             
@@ -923,6 +790,18 @@ def main():
     pools = {}
     z_storage = {}
     durations_cache = {}
+    
+    # Load chat insert files from 'chat inserts' folder (same level as originals)
+    chat_files = []
+    chat_dir = Path(args.input_root).parent / "chat inserts"
+    if chat_dir.exists() and chat_dir.is_dir():
+        chat_files = list(chat_dir.glob("*.json"))
+        if chat_files:
+            print(f"✓ Found {len(chat_files)} chat insert files in: {chat_dir}")
+        else:
+            print(f"⚠️ 'chat inserts' folder exists but is empty: {chat_dir}")
+    else:
+        print(f"⚠️ No 'chat inserts' folder found (will skip chat inserts)")
 
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
@@ -1174,10 +1053,10 @@ def main():
             
             total_afk_pool = total_idle_movements
             
-            # Insert OSRS chat message (20% chance) - INCLUDED in TIME SENSITIVE
+            # Insert chat message from 'chat inserts' folder (20% chance)
             chat_inserted = False
-            if merged:
-                merged, chat_inserted = insert_osrs_chat_message(merged, rng)
+            if merged and chat_files:
+                merged, chat_inserted = insert_chat_from_file(merged, rng, chat_files)
                 if chat_inserted:
                     timeline = merged[-1]["Time"]
             
@@ -1228,8 +1107,10 @@ def main():
                 f"                    - Between original files pauses: {format_ms_precise(total_gaps)}"
             ]
             
-            # Add Normal File Pause if present
-            if total_normal_pauses > 0:
+            # Always show Normal File Pause for NORMAL files (even if 0)
+            if not is_inef and not is_time_sensitive:
+                manifest_entry.append(f"                    - Normal file pause: {format_ms_precise(total_normal_pauses)}")
+            elif total_normal_pauses > 0:  # Show for other types only if > 0
                 manifest_entry.append(f"                    - Normal file pause: {format_ms_precise(total_normal_pauses)}")
             
             # Add chat and idle info
