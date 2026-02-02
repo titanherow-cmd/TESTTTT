@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.10.0 - Chat Inserts & File Selection Fix  
-- NEW: Chat messages loaded from 'chat inserts' folder (recorded .json files)
-- FIX: TIME SENSITIVE uses 1.1x multiplier (was 1.5x) → more files selected
-- FIX: NORMAL/INEFFICIENT uses 1.8x multiplier for better accuracy
-- FIX: Normal File Pause always shows in manifest for normal files
-- REMOVED: Old hard-coded OSRS_CHAT_MESSAGES list (326 messages)
+merge_macros.py - v3.10.1 - CRITICAL FIX: NameError
+- FIX: is_time_sensitive parameter error in get_sequence()
+- Previous: v3.10.0 (Chat inserts, file selection fix)
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.10.0"
+VERSION = "v3.10.1"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -697,17 +694,17 @@ class QueueFileSelector:
         self.rng.shuffle(self.eff_pool)
         self.rng.shuffle(self.ineff_pool)
 
-    def get_sequence(self, target_minutes, force_inef=False, strictly_eff=False):
+    def get_sequence(self, target_minutes, force_inef=False, is_time_sensitive=False):
         seq, cur_ms = [], 0.0
         target_ms = target_minutes * 60000
-        actual_force = force_inef if not strictly_eff else False
+        actual_force = force_inef if not is_time_sensitive else False
         while cur_ms < target_ms:
             if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
             elif self.eff_pool: pick = self.eff_pool.pop(0)
             elif self.efficient:
                 self.eff_pool = list(self.efficient); self.rng.shuffle(self.eff_pool)
                 pick = self.eff_pool.pop(0)
-            elif self.ineff_pool and not strictly_eff: pick = self.ineff_pool.pop(0)
+            elif self.ineff_pool and not is_time_sensitive: pick = self.ineff_pool.pop(0)
             else: break
             seq.append(pick)
             
