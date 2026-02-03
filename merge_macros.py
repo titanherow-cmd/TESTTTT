@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.14.0 - Smart File Selection & Gap Variance
-- FIX: Multiplier adjusted to 1.35x (sweet spot between 1.0x and 1.8x)
-- CHANGE: Each inter-file gap is RANDOM (500-5000ms), then multiplied
-- FIX: Removed OSRS chat from manifest
-- NOTE: No speed modifications in JSON - all timing is event-based
-- ISSUE: 1.0x caused 11-18 min overshoot, 1.8x caused 10-13 min undershoot
+merge_macros.py - v3.15.0 - Accurate Filenames & Manifest Layout
+- FIX: Filename now shows exact time (e.g., 20_A_37m22s not 20_A_37m)
+- FIX: Manifest layout improved - version header includes duration
+- FIX: Manifest now shows actual seconds for all times
+- NOTE: No speed modifications exist - all timing is event-based
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.14.0"
+VERSION = "v3.15.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -1132,7 +1131,11 @@ def main():
                         # The last event of this file is affected by the pause
                         seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
-            fname = f"{'¬¬' if is_inef else ''}{v_code}_{int(timeline/60000)}m.json"
+            # Calculate exact time for filename
+            total_minutes = int(timeline / 60000)
+            total_seconds = int((timeline % 60000) / 1000)
+            
+            fname = f"{'¬¬' if is_inef else ''}{v_code}_{total_minutes}m{total_seconds}s.json"
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
             # Calculate pause time (idle movements are informational only)
@@ -1149,15 +1152,16 @@ def main():
             # Calculate pause times
             # Only inter-file gaps get multiplied!
             original_intra = total_intra_pauses  # Not multiplied
-            original_inter = int(total_gaps / mult) if mult > 0 else total_gaps  # Reverse to get original
-            original_normal = total_normal_pauses  # Not multiplied
+            original_inter = int(total_gaps / mult) if mult > 0 else total_gaps
+            original_normal = total_normal_pauses
             original_total = original_intra + original_inter + original_normal
             
-            # Actual after multiplier (for display)
-            actual_inter = total_gaps  # Already includes multiplier
+            # Calculate total time in minutes and seconds
+            total_min = int(timeline / 60000)
+            total_sec = int((timeline % 60000) / 1000)
             
-            # Version label with separator
-            version_label = f"Version {v_code}:"
+            # Version label with duration and separator
+            version_label = f"Version {v_code}_{total_min}m{total_sec}s:"
             separator = "=" * 40
             
             manifest_entry = [
@@ -1165,10 +1169,10 @@ def main():
                 " ",
                 version_label,
                 f"FILE TYPE: {file_type}",
-                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier on inter-file only)",
-                f"BREAKDOWN = {format_ms_precise(original_total)} ",
+                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier)",
+                f"BREAKDOWN",
                 f"total before    - Within original files pauses: {format_ms_precise(original_intra)}",
-                f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)} (×{mult} = {format_ms_precise(actual_inter)})",
+                f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)}",
                 f"                - Normal file pause: {format_ms_precise(original_normal)}",
             ]
             
