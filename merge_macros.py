@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.12.1 - File Selector Logic Fix (Critical)
-- FIX: File selector was stopping too early (24min instead of 35min)
-- FIX: Chat queue now cycles through ALL files before repeating
-- FIX: Manifest alignment improved with clearer labels
-- ISSUE: v3.12.0 had faulty min_acceptable logic causing early stops
+merge_macros.py - v3.13.0 - Multiplier Fix & Pause Adjustments
+- FIX: Multiplier lowered to 1.0x (was 1.8x) - adds correct number of files
+- CHANGE: Normal file pause now 0-2 minutes (was 1-3 minutes)
+- CHANGE: Massive pause now 4-9 minutes (was 5-12 minutes)
+- FIX: Manifest math corrected (multiplier only affects inter-file gaps)
+- ISSUE: 1.8x multiplier caused 10-13 minute shortfalls
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.12.1"
+VERSION = "v3.13.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -380,7 +381,7 @@ def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
 
 def insert_normal_file_pauses(events: list, rng: random.Random) -> tuple:
     """
-    Insert 1-3 random extended pauses (1-3 minutes each) for NORMAL files only.
+    Insert 1-3 random extended pauses (0-2 minutes each) for NORMAL files only.
     These are inserted at random points throughout the merged file.
     Returns (events_with_pauses, total_pause_time).
     """
@@ -402,8 +403,8 @@ def insert_normal_file_pauses(events: list, rng: random.Random) -> tuple:
     
     # Apply pauses at selected indices
     for pause_idx in pause_indices:
-        # Generate non-rounded pause duration (1-3 minutes = 60000-180000ms)
-        pause_duration = int(rng.uniform(60000.123, 179999.987))
+        # Generate non-rounded pause duration (0-2 minutes = 0-120000ms)
+        pause_duration = int(rng.uniform(0.123, 119999.987))
         total_pause_added += pause_duration
         
         # Shift this event and all subsequent events by the pause
@@ -718,11 +719,13 @@ class QueueFileSelector:
             
             file_duration = self.durations.get(pick, 500)
             
-            # Use existing multipliers (unchanged)
+            # File selector multiplier - CRITICAL for accuracy
+            # 1.0x = no multiplication = actual file duration
+            # This ensures selector adds enough files to reach target
             if is_time_sensitive:
-                estimated_time = file_duration * 1.1
+                estimated_time = file_duration * 1.05  # TIME SENSITIVE: minimal overhead
             else:
-                estimated_time = file_duration * 1.8
+                estimated_time = file_duration * 1.0   # NORMAL: 1.0x = adds correct number of files
             
             # Check if adding would overshoot too much
             potential_total = cur_ms + estimated_time
@@ -1114,7 +1117,8 @@ def main():
                     timeline = merged[-1]["Time"]
             
             if is_inef and not data["is_ts"] and len(merged) > 1:
-                p_ms = rng.randint(300000, 720000)
+                # Massive pause: 4-9 minutes (240000-540000ms)
+                p_ms = rng.randint(240000, 540000)
                 split = rng.randint(0, len(merged) - 2)
                 for j in range(split + 1, len(merged)): merged[j]["Time"] += p_ms
                 timeline = merged[-1]["Time"]
@@ -1141,11 +1145,15 @@ def main():
             else:
                 file_type = "Normal"
             
-            # Calculate original pause times (before multiplier)
-            original_intra = total_intra_pauses
-            original_inter = int(total_gaps / mult) if mult > 0 else total_gaps
-            original_normal = total_normal_pauses
+            # Calculate pause times
+            # Only inter-file gaps get multiplied!
+            original_intra = total_intra_pauses  # Not multiplied
+            original_inter = int(total_gaps / mult) if mult > 0 else total_gaps  # Reverse to get original
+            original_normal = total_normal_pauses  # Not multiplied
             original_total = original_intra + original_inter + original_normal
+            
+            # Actual after multiplier (for display)
+            actual_inter = total_gaps  # Already includes multiplier
             
             # Version label with separator
             version_label = f"Version {v_code}:"
@@ -1156,10 +1164,10 @@ def main():
                 " ",
                 version_label,
                 f"FILE TYPE: {file_type}",
-                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier)",
+                f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier on inter-file only)",
                 f"BREAKDOWN = {format_ms_precise(original_total)} ",
                 f"total before    - Within original files pauses: {format_ms_precise(original_intra)}",
-                f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)}",
+                f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)} (×{mult} = {format_ms_precise(actual_inter)})",
                 f"                - Normal file pause: {format_ms_precise(original_normal)}",
             ]
             
