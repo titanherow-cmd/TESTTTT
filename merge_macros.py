@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.12.0 - File Selector Logic Fix
-- FIX: File selector stops when within 2-4 min of target (not exact)
-- FIX: Only 1 chat per merged file (not multiple)
-- FIX: Chat between files with queue system
-- FIX: Manifest shows breakdown for ALL types (including TIME SENSITIVE)
-- FIX: Normal file pause shows in TIME SENSITIVE manifest (as 0)
-- NOTE: Multipliers unchanged from original user settings
+merge_macros.py - v3.12.1 - File Selector Logic Fix (Critical)
+- FIX: File selector was stopping too early (24min instead of 35min)
+- FIX: Chat queue now cycles through ALL files before repeating
+- FIX: Manifest alignment improved with clearer labels
+- ISSUE: v3.12.0 had faulty min_acceptable logic causing early stops
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.12.0"
+VERSION = "v3.12.1"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -703,18 +701,20 @@ class QueueFileSelector:
         target_ms = target_minutes * 60000
         actual_force = force_inef if not is_time_sensitive else False
         
-        # Acceptable range: target ± 2-4 minutes
-        min_acceptable = target_ms - (4 * 60000)  # 4 min under is OK
-        max_acceptable = target_ms + (4 * 60000)  # 4 min over is OK
+        # Keep adding files until we reach target
+        # Stop conditions:
+        # 1. Reached target OR
+        # 2. Adding next file would overshoot by more than 4 minutes
         
-        while cur_ms < min_acceptable:  # Keep going until we're at least close
+        while cur_ms < target_ms:
+            # Try to get next file
             if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
             elif self.eff_pool: pick = self.eff_pool.pop(0)
             elif self.efficient:
                 self.eff_pool = list(self.efficient); self.rng.shuffle(self.eff_pool)
                 pick = self.eff_pool.pop(0)
             elif self.ineff_pool and not is_time_sensitive: pick = self.ineff_pool.pop(0)
-            else: break
+            else: break  # No more files
             
             file_duration = self.durations.get(pick, 500)
             
@@ -724,18 +724,20 @@ class QueueFileSelector:
             else:
                 estimated_time = file_duration * 1.8
             
-            # Check if adding this file would overshoot too much
-            if cur_ms >= min_acceptable and (cur_ms + estimated_time) > max_acceptable:
-                # We're in acceptable range and adding would overshoot
-                # Only add if we're still significantly under target
-                if cur_ms < (target_ms - (2 * 60000)):  # More than 2 min under
+            # Check if adding would overshoot too much
+            potential_total = cur_ms + estimated_time
+            overshoot = potential_total - target_ms
+            
+            if overshoot > (4 * 60000):  # Would overshoot by more than 4 minutes
+                # Only skip if we're already reasonably close to target
+                if cur_ms >= (target_ms - (4 * 60000)):  # Within 4 min of target
+                    break  # Close enough, stop
+                else:
+                    # Still far from target, add it anyway
                     seq.append(pick)
                     cur_ms += estimated_time
-                else:
-                    # Close enough to target, stop here
-                    break
             else:
-                # Safe to add
+                # Safe to add (won't overshoot by more than 4 min)
                 seq.append(pick)
                 cur_ms += estimated_time
             
@@ -957,13 +959,19 @@ def main():
             " "
         ]
         
+        # Global chat queue - persists across all versions
+        # Ensures all chat files get used before repeating
+        global_chat_queue = list(chat_files) if chat_files else []
+        if global_chat_queue:
+            rng.shuffle(global_chat_queue)
+        
         norm_v = args.versions
         inef_v = 0 if data["is_ts"] else (norm_v // 2)
         
         for v_idx in range(1, (norm_v + inef_v) + 1):
             is_inef = (v_idx > norm_v)
             v_letter = chr(64 + v_idx)
-            v_code = f"{folder_number}_{v_letter}"  # Changed from {folder_number}{v_letter}
+            v_code = f"{folder_number}_{v_letter}"
             
             if data["is_ts"]: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef: mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
@@ -989,12 +997,9 @@ def main():
             if not paths:
                 continue
             
-            # Chat queue system - only 1 chat per merged file
-            chat_queue = list(chat_files) if chat_files else []
-            if chat_queue:
-                rng.shuffle(chat_queue)
-            chat_used = False  # Track if we've used chat yet
-            chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 else -1  # Random file index to insert before
+            # Chat - only 1 per merged file, using global queue
+            chat_used = False
+            chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 else -1
             file_segments = []
             
             for i, p in enumerate(paths):
@@ -1009,8 +1014,8 @@ def main():
                 is_time_sensitive = "time sensitive" in str(data["rel_path"]).lower() or "time-sensitive" in str(data["rel_path"]).lower()
                 
                 # INSERT CHAT ONCE (before the chosen file index)
-                if not chat_used and i == chat_insertion_point and chat_queue:
-                    chat_file = chat_queue.pop(0)
+                if not chat_used and i == chat_insertion_point and global_chat_queue:
+                    chat_file = global_chat_queue.pop(0)  # Take from front
                     try:
                         chat_events = load_json_events(chat_file)
                         if chat_events:
@@ -1032,9 +1037,17 @@ def main():
                                     "is_chat": True
                                 })
                                 chat_used = True
-                                chat_queue.append(chat_file)  # Move to back
+                                
+                                # Put used file at END of queue (ensures all files used before repeat)
+                                global_chat_queue.append(chat_file)
+                                
+                                # If queue is empty, refill and shuffle
+                                if not global_chat_queue and chat_files:
+                                    global_chat_queue = list(chat_files)
+                                    rng.shuffle(global_chat_queue)
                     except Exception as e:
                         print(f"  ⚠️ Error loading chat {chat_file.name}: {e}")
+                        global_chat_queue.append(chat_file)  # Return to queue
                 
                 # Step 1: Add pre-move jitter (random 20-45% of moves)
                 # TIME SENSITIVE: Skip jitter (NEW rule - excluded)
@@ -1144,12 +1157,13 @@ def main():
                 version_label,
                 f"FILE TYPE: {file_type}",
                 f"  Total PAUSE ADDED: {format_ms_precise(total_pause)} (x{mult} Multiplier)",
-                f"BREAKDOWN: {format_ms_precise(original_total)}  - Within original files pauses: {format_ms_precise(original_intra)}",
-                f"                   - Between original files pauses: {format_ms_precise(original_inter)}",
+                f"BREAKDOWN = {format_ms_precise(original_total)} ",
+                f"total before    - Within original files pauses: {format_ms_precise(original_intra)}",
+                f"multiplier      - Between original files pauses: {format_ms_precise(original_inter)}",
+                f"                - Normal file pause: {format_ms_precise(original_normal)}",
             ]
             
-            # ALWAYS show Normal File Pause (even if 0, even for TIME SENSITIVE)
-            manifest_entry.append(f"                   - Normal file pause: {format_ms_precise(original_normal)}")
+            # No need to add again, already in breakdown above
             
             # Add chat and idle info
             manifest_entry.extend([
