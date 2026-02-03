@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.13.0 - Multiplier Fix & Pause Adjustments
-- FIX: Multiplier lowered to 1.0x (was 1.8x) - adds correct number of files
-- CHANGE: Normal file pause now 0-2 minutes (was 1-3 minutes)
-- CHANGE: Massive pause now 4-9 minutes (was 5-12 minutes)
-- FIX: Manifest math corrected (multiplier only affects inter-file gaps)
-- ISSUE: 1.8x multiplier caused 10-13 minute shortfalls
+merge_macros.py - v3.14.0 - Smart File Selection & Gap Variance
+- FIX: Multiplier adjusted to 1.35x (sweet spot between 1.0x and 1.8x)
+- CHANGE: Each inter-file gap is RANDOM (500-5000ms), then multiplied
+- FIX: Removed OSRS chat from manifest
+- NOTE: No speed modifications in JSON - all timing is event-based
+- ISSUE: 1.0x caused 11-18 min overshoot, 1.8x caused 10-13 min undershoot
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.13.0"
+VERSION = "v3.14.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -720,12 +720,13 @@ class QueueFileSelector:
             file_duration = self.durations.get(pick, 500)
             
             # File selector multiplier - CRITICAL for accuracy
-            # 1.0x = no multiplication = actual file duration
-            # This ensures selector adds enough files to reach target
+            # 1.0x = too many files (overshoot 11-18 min)
+            # 1.8x = too few files (undershoot 10-13 min)
+            # 1.35x = sweet spot (target ±2-4 min)
             if is_time_sensitive:
                 estimated_time = file_duration * 1.05  # TIME SENSITIVE: minimal overhead
             else:
-                estimated_time = file_duration * 1.0   # NORMAL: 1.0x = adds correct number of files
+                estimated_time = file_duration * 1.35  # NORMAL: balanced estimate
             
             # Check if adding would overshoot too much
             potential_total = cur_ms + estimated_time
@@ -1171,11 +1172,8 @@ def main():
                 f"                - Normal file pause: {format_ms_precise(original_normal)}",
             ]
             
-            # No need to add again, already in breakdown above
-            
-            # Add chat and idle info
+            # Add idle and jitter info (no chat)
             manifest_entry.extend([
-                f"OSRS Chat Message: {'YES' if chat_inserted else 'NO'} ",
                 f"Idle Mouse Movements: {format_ms_precise(total_idle_movements)}",
                 f"Mouse Jitter: {int(jitter_percentage * 100)}%"
             ])
