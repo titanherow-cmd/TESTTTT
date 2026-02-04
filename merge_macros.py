@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.15.0 - Accurate Filenames & Manifest Layout
-- FIX: Filename now shows exact time (e.g., 20_A_37m22s not 20_A_37m)
-- FIX: Manifest layout improved - version header includes duration
-- FIX: Manifest now shows actual seconds for all times
-- NOTE: No speed modifications exist - all timing is event-based
+merge_macros.py - v3.15.1 - Remove Time Rounding
+- FIX: Removed ALL int() conversions on Time field assignments (preserves exact ms)
+- CLARIFY: Speed profiles EXIST for idle mouse movements (fast_start, slow_start, medium, hesitant)
+- NOTE: Speed profiles affect movement curves, not playback speed
+- ISSUE: v3.15.0 had 4 places where Time was rounded with int()
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.15.0"
+VERSION = "v3.15.1"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -328,9 +328,9 @@ def insert_chat_from_file(events: list, rng: random.Random, chat_files: list) ->
         # Calculate chat duration
         chat_duration = max(e.get('Time', 0) for e in chat_events) - base_time
         
-        # Shift all events AFTER insertion point
+        # Shift all events AFTER insertion point (no rounding!)
         for i in range(insertion_point, len(events)):
-            events[i]['Time'] = int(events[i]['Time']) + chat_duration
+            events[i]['Time'] = events[i]['Time'] + chat_duration
         
         # Insert chat events
         for i, chat_event in enumerate(chat_events):
@@ -372,9 +372,9 @@ def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
         pause_duration = int(rng.uniform(1000.123, 1999.987))
         total_pause_added += pause_duration
         
-        # Shift this event and all subsequent events by the pause
+        # Shift this event and all subsequent events by the pause (no rounding!)
         for j in range(pause_idx, len(events)):
-            events[j]["Time"] = int(events[j]["Time"]) + pause_duration
+            events[j]["Time"] = events[j]["Time"] + pause_duration
     
     return events, total_pause_added
 
@@ -406,9 +406,9 @@ def insert_normal_file_pauses(events: list, rng: random.Random) -> tuple:
         pause_duration = int(rng.uniform(0.123, 119999.987))
         total_pause_added += pause_duration
         
-        # Shift this event and all subsequent events by the pause
+        # Shift this event and all subsequent events by the pause (no rounding!)
         for j in range(pause_idx, len(events)):
-            events[j]["Time"] = int(events[j]["Time"]) + pause_duration
+            events[j]["Time"] = events[j]["Time"] + pause_duration
     
     return events, total_pause_added
 
@@ -1091,7 +1091,7 @@ def main():
                 
                 for e in raw_with_movements:
                     ne = {**e}
-                    rel_offset = int(int(e["Time"]) - base_t)
+                    rel_offset = e["Time"] - base_t  # No rounding!
                     ne["Time"] = timeline + rel_offset
                     merged.append(ne)
                 
