@@ -1,82 +1,83 @@
-name: Merge macros (persisted counter, scan all folders, zip top-level)
+name: Merge Macros
 
 on:
   workflow_dispatch:
     inputs:
       versions:
-        description: 'How many versions per group'
-        required: true
+        description: 'Number of versions to create'
+        required: false
         default: '6'
+        type: string
       target_minutes:
-        description: 'Target duration per merged file'
-        required: true
+        description: 'Target duration in minutes'
+        required: false
         default: '35'
-
-permissions:
-  contents: write
+        type: string
+      enable_chat:
+        description: 'Enable chat inserts'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   merge:
     runs-on: ubuntu-latest
     
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout repository
+        uses: actions/checkout@v3
       
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
-          
-      - name: Get current BUNDLE_SEQ
-        id: seq
+          python-version: '3.11'
+      
+      - name: Get next bundle ID
+        id: bundle_id
         run: |
-          if [ -f .github/merge_bundle_counter.txt ]; then
-            VAL=$(cat .github/merge_bundle_counter.txt)
+          # Find the highest bundle number
+          if [ -d "output" ]; then
+            HIGHEST=$(find output -name "merged_bundle_*" -type d | \
+                     sed 's/.*merged_bundle_//' | \
+                     sort -n | tail -1)
+            NEXT=$((HIGHEST + 1))
           else
-            VAL=1
+            NEXT=1
           fi
-          echo "BUNDLE_SEQ=$VAL" >> "$GITHUB_ENV"
-        
-      - name: Execute macro merge script
+          echo "bundle_id=$NEXT" >> $GITHUB_OUTPUT
+          echo "Next bundle ID: $NEXT"
+      
+      - name: Run merge script
         run: |
-          mkdir -p output
-          python3 merge_macros.py \
-            "input_macros" \
-            "output" \
-            --versions ${{ github.event.inputs.versions }} \
-            --target-minutes ${{ github.event.inputs.target_minutes }} \
-            --bundle-id ${{ env.BUNDLE_SEQ }}
-            
-      - name: Commit and Push Counter Update
-        run: |
-          NEW_VAL=$((BUNDLE_SEQ + 1))
-          mkdir -p .github
-          echo "$NEW_VAL" > .github/merge_bundle_counter.txt
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add .github/merge_bundle_counter.txt
-          git commit -m "Increment bundle counter to $NEW_VAL" || echo "No changes"
-          git push || echo "Push failed"
-            
-      - name: Create ZIP artifact
-        run: |
-          BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
-          ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
+          # Build command with conditional --no-chat flag
+          CMD="python merge_macros.py originals/ output/ \
+            --versions ${{ inputs.versions }} \
+            --target-minutes ${{ inputs.target_minutes }} \
+            --bundle-id ${{ steps.bundle_id.outputs.bundle_id }}"
           
-          ls -R output/
-          
-          if [ -d "output/$BUNDLE_NAME" ]; then
-            cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
+          # Add --no-chat if chat is disabled
+          if [ "${{ inputs.enable_chat }}" = "false" ]; then
+            CMD="$CMD --no-chat"
+            echo "🔕 Chat inserts DISABLED"
           else
-            echo "Error: Directory output/$BUNDLE_NAME was not found!"
-            exit 1
+            echo "✅ Chat inserts ENABLED"
           fi
-          echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
-
-      - name: Upload merged ZIP artifact
-        uses: actions/upload-artifact@v4
+          
+          # Execute command
+          echo "Running: $CMD"
+          $CMD
+      
+      - name: Upload merged files
+        uses: actions/upload-artifact@v3
         with:
-          name: merged_macros_bundle_${{ env.BUNDLE_SEQ }}
-          path: ${{ env.FINAL_ZIP }}
+          name: merged-bundle-${{ steps.bundle_id.outputs.bundle_id }}
+          path: output/merged_bundle_${{ steps.bundle_id.outputs.bundle_id }}/
+          retention-days: 30
+      
+      - name: Commit and push
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add output/
+          git commit -m "Add merged bundle ${{ steps.bundle_id.outputs.bundle_id }}" || echo "No changes to commit"
+          git push || echo "Nothing to push"
