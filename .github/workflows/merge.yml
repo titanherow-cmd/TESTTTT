@@ -25,10 +25,10 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
@@ -68,7 +68,7 @@ jobs:
           $CMD
       
       - name: Upload merged files
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: merged-bundle-${{ steps.bundle_id.outputs.bundle_id }}
           path: output/merged_bundle_${{ steps.bundle_id.outputs.bundle_id }}/
