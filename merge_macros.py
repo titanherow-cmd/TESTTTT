@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.17.1 - Enable Jitter for TIME SENSITIVE
-- FIX: Mouse jitter now works on TIME SENSITIVE folders (doesn't affect timing)
-- Jitter adds 2-3 micro-movements before target (100-200ms total, part of move)
-- ISSUE: v3.17.0 incorrectly excluded jitter from TIME SENSITIVE
+merge_macros.py - v3.18.0 - Fix Cursor Teleporting
+- FIX: Cursor now transitions smoothly between files during gaps
+- Adds realistic mouse movement during inter-file gaps
+- ISSUE: v3.17.1 had cursor teleporting between merged files
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.17.1"
+VERSION = "v3.18.0"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -1085,8 +1085,49 @@ def main():
                 # Inter-file gap: 500-5000ms (non-rounded) × multiplier
                 if i > 0:
                     gap = int(rng.uniform(500.123, 4999.987) * mult)
+                    
+                    # CRITICAL: Add cursor transition during gap to prevent teleporting
+                    # Get last cursor position from previous file
+                    last_cursor_event = None
+                    for e in reversed(merged):
+                        if 'X' in e and 'Y' in e:
+                            last_cursor_event = e
+                            break
+                    
+                    # Get first cursor position from current file
+                    first_cursor_event = None
+                    for e in raw_with_movements:
+                        if 'X' in e and 'Y' in e:
+                            first_cursor_event = e
+                            break
+                    
+                    # If both exist and positions differ, add smooth transition
+                    if last_cursor_event and first_cursor_event:
+                        last_x, last_y = last_cursor_event['X'], last_cursor_event['Y']
+                        first_x, first_y = first_cursor_event['X'], first_cursor_event['Y']
+                        
+                        # Only add transition if positions are different (avoid redundant move)
+                        if (last_x != first_x) or (last_y != first_y):
+                            # Create smooth cursor transition during the gap
+                            transition_path = generate_human_path(
+                                last_x, last_y,
+                                first_x, first_y,
+                                gap,  # Use gap duration for transition
+                                rng
+                            )
+                            
+                            # Insert transition events during the gap
+                            for rel_time, x, y in transition_path:
+                                if rel_time < gap:  # Only use events within gap duration
+                                    merged.append({
+                                        'Type': 'MouseMove',
+                                        'Time': timeline + rel_time,
+                                        'X': x,
+                                        'Y': y
+                                    })
                 else:
                     gap = 0
+                    
                 timeline += gap
                 total_gaps += gap
                 
