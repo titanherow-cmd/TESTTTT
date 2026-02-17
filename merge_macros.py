@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.20.1 - Raw File Feature Rules Corrected
-- FIX: Raw files now have jitter + idle (no time cost, ok to include)
-- FIX: Raw files still skip intra-pauses and normal-file-pause (add time)
-- FIX: Raw files have no chat inserts
-- FIX: Raw tag changed from = to ^
+merge_macros.py - v3.20.2 - Correct File Counts Per Folder Type
+- Regular folder: norm_v normal + norm_v//2 inef + 3 raw  (default: 6+3+3 = 12)
+- TS folder:      norm_v TS     + 0 inef          + 3 raw  (default: 6+0+3 = 9)
+- FIXED: TS folders no longer also produce normal versions on top
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.20.1"
+VERSION = "v3.20.2"
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -976,28 +975,29 @@ def main():
         # Note: global_chat_queue is created BEFORE folder loop (persists across all folders)
         
         norm_v = args.versions
-        inef_v = 0 if data["is_ts"] else (norm_v // 2)
-        raw_v  = 0 if data["is_ts"] else 3   # 3 raw files for non-TS folders
-        ts_v   = norm_v if data["is_ts"] else 0  # TS folders also get norm_v TS versions
-        
-        # v_idx 1..norm_v             → normal (all folders)
-        # v_idx norm_v+1..+inef_v     → inefficient (non-TS only)
-        # v_idx ..+1..+raw_v          → raw = prefix (non-TS only)
-        # v_idx ..+1..+ts_v           → time sensitive (TS folders only, on top of normal)
-        total_v = norm_v + inef_v + raw_v + ts_v
-        
+        is_ts  = data["is_ts"]
+
+        # Regular folder:  norm_v normal  +  norm_v//2 inef  +  3 raw
+        # TS folder:        norm_v TS      +  0 inef          +  3 raw
+        inef_v  = 0 if is_ts else (norm_v // 2)
+        raw_v   = 3   # always 3 raw (^ tag) for every folder type
+        total_v = norm_v + inef_v + raw_v
+
+        # v_idx 1..norm_v              → TS versions (TS folder) OR Normal (regular folder)
+        # v_idx norm_v+1..+inef_v      → Inefficient ¬¬  (regular folder only, 0 for TS)
+        # v_idx ..+1..+raw_v           → Raw ^            (all folders)
         for v_idx in range(1, total_v + 1):
-            is_inef         = (norm_v < v_idx <= norm_v + inef_v)
-            is_raw          = (norm_v + inef_v < v_idx <= norm_v + inef_v + raw_v)
-            is_ts_version   = (v_idx > norm_v + inef_v + raw_v) and data["is_ts"]
+            is_inef       = (norm_v < v_idx <= norm_v + inef_v)
+            is_raw        = (v_idx > norm_v + inef_v)
+            is_ts_version = is_ts and not is_raw   # first norm_v slots are TS in a TS folder
             v_letter = chr(64 + v_idx)
             v_code = f"{folder_number}_{v_letter}"
-            
+
             if is_ts_version: mult = rng.choice([1.0, 1.2, 1.5])
             elif is_inef:     mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
             elif is_raw:      mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
             else:             mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
-            
+
             movement_percentage = rng.uniform(0.40, 0.50)
             jitter_percentage = 0.0  # Will be set per file
             
