@@ -1,18 +1,93 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.20.2 - Correct File Counts Per Folder Type
-- Regular folder: norm_v normal + norm_v//2 inef + 3 raw  (default: 6+3+3 = 12)
-- TS folder:      norm_v TS     + 0 inef          + 3 raw  (default: 6+0+3 = 9)
-- FIXED: TS folders no longer also produce normal versions on top
+merge_macros.py - v3.21.0 - Added Folder Whitelist Feature
+- NEW: Support for folders_to_merge.txt whitelist file
+- Place "folders_to_merge.txt" in root directory with folder names (one per line)
+- If file exists: ONLY process folders listed in the file
+- If file doesn't exist: Process ALL folders (backward compatible)
+- Supports exact folder name matching (case-insensitive)
+- Empty lines and lines starting with # are ignored (comments)
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.20.2"
+VERSION = "v3.21.0"
 
 
+def load_folder_whitelist(root_path: Path) -> set:
+    """
+    Load folder whitelist from 'folders_to_merge.txt' file.
+    Returns a set of folder names to process (case-insensitive).
+    If file doesn't exist, returns None (process all folders).
+    
+    File format:
+    - One folder name per line
+    - Empty lines ignored
+    - Lines starting with # are comments (ignored)
+    - Case-insensitive matching
+    
+    Example file content:
+    # Mining folders
+    1-Mining
+    23-Fishing
+    
+    # Woodcutting
+    45-Woodcutting
+    """
+    whitelist_file = root_path / "folders_to_merge.txt"
+    
+    if not whitelist_file.exists():
+        return None  # No whitelist = process all folders
+    
+    try:
+        whitelist = set()
+        with open(whitelist_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                # Add folder name (lowercase for case-insensitive matching)
+                whitelist.add(line.lower())
+        
+        if whitelist:
+            print(f"✓ Loaded folder whitelist from: {whitelist_file}")
+            print(f"  Processing {len(whitelist)} folder(s):")
+            for folder in sorted(whitelist):
+                print(f"    - {folder}")
+            return whitelist
+        else:
+            print(f"⚠️  Whitelist file is empty: {whitelist_file}")
+            print(f"  Processing ALL folders (no restrictions)")
+            return None
+            
+    except Exception as e:
+        print(f"⚠️  Error reading whitelist file: {e}")
+        print(f"  Processing ALL folders (no restrictions)")
+        return None
+
+
+def should_process_folder(folder_name: str, whitelist: set) -> bool:
+    """
+    Check if a folder should be processed based on whitelist.
+    
+    Args:
+        folder_name: Name of the folder to check
+        whitelist: Set of whitelisted folder names (None = process all)
+    
+    Returns:
+        True if folder should be processed, False otherwise
+    """
+    if whitelist is None:
+        return True  # No whitelist = process all folders
+    
+    # Case-insensitive matching
+    return folder_name.lower() in whitelist
+
+
+# [REST OF THE ORIGINAL CODE REMAINS THE SAME]
 # Chat inserts are loaded from 'chat inserts' folder at runtime
 def load_json_events(path: Path):
     try:
@@ -775,6 +850,9 @@ def main():
     if not originals_root:
         originals_root = search_base
     
+    # NEW: Load folder whitelist
+    folder_whitelist = load_folder_whitelist(originals_root.parent)
+    
     logout_file = None
     logout_patterns = ["logout.json", "- logout.json", "-logout.json", "logout", "- logout", "-logout"]
     
@@ -813,6 +891,10 @@ def main():
     else:
         print(f"🔕 Chat inserts DISABLED (--no-chat flag)")
 
+    # Track skipped folders for summary
+    skipped_folders = []
+    processed_folders = []
+
     for root, dirs, files in os.walk(originals_root):
         curr = Path(root)
         if any(p in curr.parts for p in [".git", ".github", "output"]): continue
@@ -821,6 +903,14 @@ def main():
         non_jsons = [f for f in files if not f.endswith(".json")]
         
         if not jsons: continue
+        
+        # NEW: Check if this folder should be processed based on whitelist
+        folder_name = curr.name
+        if not should_process_folder(folder_name, folder_whitelist):
+            skipped_folders.append(folder_name)
+            continue  # Skip this folder
+        
+        processed_folders.append(folder_name)
         
         is_z_storage = "z +100" in str(curr).lower()
         
@@ -867,6 +957,22 @@ def main():
                 
                 for fp in file_paths:
                     durations_cache[fp] = get_file_duration_ms(fp)
+
+    # Print whitelist summary
+    if folder_whitelist is not None:
+        print(f"\n{'='*60}")
+        print(f"WHITELIST FILTER SUMMARY")
+        print(f"{'='*60}")
+        print(f"✓ Processed folders: {len(processed_folders)}")
+        for folder in sorted(processed_folders):
+            print(f"    - {folder}")
+        print(f"\n⊘ Skipped folders: {len(skipped_folders)}")
+        if skipped_folders:
+            for folder in sorted(skipped_folders)[:10]:  # Show first 10
+                print(f"    - {folder}")
+            if len(skipped_folders) > 10:
+                print(f"    ... and {len(skipped_folders) - 10} more")
+        print(f"{'='*60}\n")
 
     for pool_key, pool_data in pools.items():
         parent_scope = pool_data["parent_scope"]
@@ -927,7 +1033,7 @@ def main():
             except Exception as e:
                 print(f"  ✗ Error copying {logout_file.name}: {e}")
         else:
-            print(f"  ⚠ Warning: No logout file found")
+            print(f"  ⚠  Warning: No logout file found")
         
         if "non_json_files" in data and data["non_json_files"]:
             for non_json_file in data["non_json_files"]:
