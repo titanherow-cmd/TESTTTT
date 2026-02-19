@@ -984,14 +984,6 @@ def main():
                 durations_cache[fp] = get_file_duration_ms(fp)
 
     for pool_key, pool_data in pools.items():
-        parent_scope = pool_data["parent_scope"]
-        macro_id = pool_data["macro_id"]
-        
-        z_key = (parent_scope, macro_id)
-        if z_key in z_storage:
-            pool_data["files"].extend(z_storage[z_key])
-    
-    for pool_key, pool_data in pools.items():
         all_files = pool_data["files"]
         always_files = [f for f in all_files if is_always_first_or_last_file(Path(f).name)]
         mergeable_files = [f for f in all_files if f not in always_files]
