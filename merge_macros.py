@@ -770,8 +770,8 @@ class QueueFileSelector:
     def __init__(self, rng, all_files, durations_cache):
         self.rng = rng
         self.durations = durations_cache
-        self.efficient = [f for f in all_files if "Â¬Â¬" not in f.name]
-        self.inefficient = [f for f in all_files if "Â¬Â¬" in f.name]
+        self.efficient = [f for f in all_files if "¬¬" not in f.name]
+        self.inefficient = [f for f in all_files if "¬¬" in f.name]
         self.eff_pool = list(self.efficient)
         self.ineff_pool = list(self.inefficient)
         self.rng.shuffle(self.eff_pool)
@@ -1012,13 +1012,13 @@ def main():
         if logout_file:
             try:
                 original_name = logout_file.name
-                # Add folder number prefix with leading dash and make UPPERCASE: "logout.json" â†’ "- 46 LOGOUT.JSON"
+                # Add folder number prefix with @ prefix and make UPPERCASE: "logout.json" â†’ "- 46 LOGOUT.JSON"
                 if original_name.startswith("-"):
-                    # Already has dash: "- logout.json" â†’ "- 46 LOGOUT.JSON"
-                    new_name = f"- {folder_number} {original_name[1:].strip()}".upper()
+                    # Already has @ prefix: "- logout.json" â†’ "- 46 LOGOUT.JSON"
+                    new_name = f"@ {folder_number} {original_name[1:].strip()}".upper()
                 else:
-                    # Add dash: "logout.json" â†’ "- 46 LOGOUT.JSON"
-                    new_name = f"- {folder_number} {original_name}".upper()
+                    # Add @ prefix: "logout.json" â†’ "- 46 LOGOUT.JSON"
+                    new_name = f"@ {folder_number} {original_name}".upper()
                 logout_dest = out_f / new_name
                 shutil.copy2(logout_file, logout_dest)
                 print(f"  âœ“ Copied logout: {original_name} â†’ {new_name}")
@@ -1031,13 +1031,13 @@ def main():
             for non_json_file in data["non_json_files"]:
                 try:
                     original_name = non_json_file.name
-                    # Keep leading dash if present: "RuneLite_file.png" â†’ "- 46 RuneLite_file.png"
+                    # Keep @ prefix if present: "RuneLite_file.png" â†’ "- 46 RuneLite_file.png"
                     if original_name.startswith("-"):
-                        # Already has dash: "- file.png" â†’ "- 46 file.png"
-                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                        # Already has @ prefix: "- file.png" â†’ "- 46 file.png"
+                        new_name = f"@ {folder_number} {original_name[1:].strip()}"
                     else:
-                        # Add dash: "file.png" â†’ "- 46 file.png"
-                        new_name = f"- {folder_number} {original_name}"
+                        # Add @ prefix: "file.png" â†’ "- 46 file.png"
+                        new_name = f"@ {folder_number} {original_name}"
                     shutil.copy2(non_json_file, out_f / new_name)
                     print(f"  âœ“ Copied non-JSON file: {original_name} â†’ {new_name}")
                 except Exception as e:
@@ -1050,7 +1050,7 @@ def main():
                     # Add folder number prefix: "- always first.json" â†’ "- 46 always first.json"
                     # Handle files starting with "-" or "always"
                     if original_name.startswith("-"):
-                        new_name = f"- {folder_number} {original_name[1:].strip()}"
+                        new_name = f"@ {folder_number} {original_name[1:].strip()}"
                     else:
                         new_name = f"{folder_number} {original_name}"
                     shutil.copy2(always_file, out_f / new_name)
@@ -1082,7 +1082,7 @@ def main():
         total_v = norm_v + inef_v + raw_v
 
         # v_idx 1..norm_v              â†’ TS versions (TS folder) OR Normal (regular folder)
-        # v_idx norm_v+1..+inef_v      â†’ Inefficient Â¬Â¬  (regular folder only, 0 for TS)
+        # v_idx norm_v+1..+inef_v      â†’ Inefficient ¬¬  (regular folder only, 0 for TS)
         # v_idx ..+1..+raw_v           â†’ Raw ^            (all folders)
         for v_idx in range(1, total_v + 1):
             is_inef       = (norm_v < v_idx <= norm_v + inef_v)
@@ -1282,9 +1282,9 @@ def main():
             total_minutes = int(timeline / 60000)
             total_seconds = int((timeline % 60000) / 1000)
             
-            # File prefix: Â¬Â¬ = inefficient, ^ = raw, blank = normal/TS
+            # File prefix: ¬¬ = inefficient, ^ = raw, blank = normal/TS
             if is_raw:        prefix = "^"
-            elif is_inef:     prefix = "Â¬Â¬"
+            elif is_inef:     prefix = "¬¬"
             else:             prefix = ""
             
             fname = f"{prefix}{v_code}_{total_minutes}m{total_seconds}s.json"
