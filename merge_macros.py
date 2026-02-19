@@ -1086,7 +1086,7 @@ def main():
                     if original_name.startswith("-"):
                         new_name = f"@ {folder_number} {original_name[1:].strip()}"
                     else:
-                        new_name = f"{folder_number} {original_name}"
+                        new_name = f"@ {folder_number} {original_name}"
                     shutil.copy2(always_file, out_f / new_name)
                     print(f"  âœ“ Copied 'always' file: {original_name} â†’ {new_name}")
                 except Exception as e:
