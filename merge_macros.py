@@ -841,6 +841,7 @@ def main():
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     parser.add_argument("--no-chat", action="store_true", help="Disable chat inserts (default: enabled)")
+    parser.add_argument("--use-whitelist", action="store_true", help="Use whitelist from 'specific folders to include for merge.txt' (default: off)")
     args = parser.parse_args()
 
     search_base = Path(args.input_root).resolve()
@@ -857,8 +858,16 @@ def main():
     if not originals_root:
         originals_root = search_base
     
-    # NEW: Load folder whitelist
-    folder_whitelist = load_folder_whitelist(originals_root.parent)
+    # NEW: Load folder whitelist (only if --use-whitelist flag is set)
+    folder_whitelist = None
+    if args.use_whitelist:
+        folder_whitelist = load_folder_whitelist(originals_root.parent)
+        if folder_whitelist is None:
+            print("⚠️  --use-whitelist flag set but no whitelist file found or file is empty")
+            print("    Will process ALL folders")
+    else:
+        print("📋 Whitelist is DISABLED (--use-whitelist flag not set)")
+        print("   Processing ALL folders")
     
     logout_file = None
     logout_patterns = ["logout.json", "- logout.json", "-logout.json", "logout", "- logout", "-logout"]
