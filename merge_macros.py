@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.23.0"
+VERSION = "v3.24.0"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -804,6 +804,10 @@ class QueueFileSelector:
     def get_sequence(self, target_minutes, force_inef=False, is_time_sensitive=False):
         seq, cur_ms = [], 0.0
         target_ms = target_minutes * 60000
+        # Add ±5% margin for flexibility
+        margin = int(target_ms * 0.05)
+        target_min = target_ms - margin
+        target_max = target_ms + margin
         actual_force = force_inef if not is_time_sensitive else False
         
         # Keep adding files until we reach target
@@ -811,7 +815,7 @@ class QueueFileSelector:
         # 1. Reached target OR
         # 2. Adding next file would overshoot by more than 4 minutes
         
-        while cur_ms < target_ms:
+        while cur_ms < target_max:
             # Try to get next file
             if actual_force and self.ineff_pool: pick = self.ineff_pool.pop(0)
             elif self.eff_pool: pick = self.eff_pool.pop(0)
@@ -836,7 +840,7 @@ class QueueFileSelector:
             potential_total = cur_ms + estimated_time
             overshoot = potential_total - target_ms
             
-            if overshoot > (4 * 60000):  # Would overshoot by more than 4 minutes
+            if overshoot > margin:  # Would overshoot beyond acceptable margin
                 # Only skip if we're already reasonably close to target
                 if cur_ms >= (target_ms - (4 * 60000)):  # Within 4 min of target
                     break  # Close enough, stop
@@ -913,7 +917,6 @@ def main():
     bundle_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random()
     pools = {}
-    z_storage = {}
     durations_cache = {}
     
     # Load chat insert files from 'chat inserts' folder (unless --no-chat is set)
@@ -953,52 +956,32 @@ def main():
         processed_folders.append(curr.name)
 
         
-        is_z_storage = "z +100" in str(curr).lower()
-        
-        if is_z_storage:
-            parent_scope = None
-            for part in curr.parts:
-                if "desktop" in part.lower() or "mobile" in part.lower():
-                    parent_scope = part
-                    break
+        macro_id = clean_identity(curr.name)
+        rel_path = curr.relative_to(originals_root)
             
-            if parent_scope:
-                macro_id = clean_identity(curr.name)
-                key = (parent_scope, macro_id)
-                if key not in z_storage:
-                    z_storage[key] = []
-                
-                for f in jsons:
-                    file_path = curr / f
-                    z_storage[key].append(file_path)
-                    durations_cache[file_path] = get_file_duration_ms(file_path)
-        else:
-            macro_id = clean_identity(curr.name)
-            rel_path = curr.relative_to(originals_root)
+        parent_scope = None
+        for part in curr.parts:
+            if "desktop" in part.lower() or "mobile" in part.lower():
+                parent_scope = part
+                break
             
-            parent_scope = None
-            for part in curr.parts:
-                if "desktop" in part.lower() or "mobile" in part.lower():
-                    parent_scope = part
-                    break
-            
-            key = str(rel_path).lower()
-            if key not in pools:
-                is_ts = bool(re.search(r'time[\s-]*sens', key))
-                file_paths = [curr / f for f in jsons]
+        key = str(rel_path).lower()
+        if key not in pools:
+            is_ts = bool(re.search(r'time[\s-]*sens', key))
+            file_paths = [curr / f for f in jsons]
                 
-                pools[key] = {
-                    "rel_path": rel_path,
-                    "files": file_paths,
-                    "is_ts": is_ts,
-                    "macro_id": macro_id,
-                    "parent_scope": parent_scope,
-                    "non_json_files": [curr / f for f in non_jsons],
-                    "drop_only_files": find_drop_only_files(curr, file_paths)
-                }
+            pools[key] = {
+                "rel_path": rel_path,
+                "files": file_paths,
+                "is_ts": is_ts,
+                "macro_id": macro_id,
+                "parent_scope": parent_scope,
+                "non_json_files": [curr / f for f in non_jsons],
+                "drop_only_files": find_drop_only_files(curr, file_paths)
+            }
                 
-                for fp in file_paths:
-                    durations_cache[fp] = get_file_duration_ms(fp)
+            for fp in file_paths:
+                durations_cache[fp] = get_file_duration_ms(fp)
 
     for pool_key, pool_data in pools.items():
         parent_scope = pool_data["parent_scope"]
@@ -1049,10 +1032,11 @@ def main():
                 # Add folder number prefix with @ prefix and make UPPERCASE: "logout.json" â†’ "- 46 LOGOUT.JSON"
                 if original_name.startswith("-"):
                     # Already has @ prefix: "- logout.json" â†’ "- 46 LOGOUT.JSON"
-                    new_name = f"@ {folder_number} {original_name[1:].strip()}".upper()
+                    name_part = original_name[1:].strip()
+                    new_name = f"@ {folder_number} " + "".join([c.upper() if j % 2 == 0 else c.lower() for j, c in enumerate(name_part)])
                 else:
                     # Add @ prefix: "logout.json" â†’ "- 46 LOGOUT.JSON"
-                    new_name = f"@ {folder_number} {original_name}".upper()
+                    new_name = f"@ {folder_number} " + "".join([j % 2 == 0 and c.upper() or c.lower() for j, c in enumerate(original_name)])
                 logout_dest = out_f / new_name
                 shutil.copy2(logout_file, logout_dest)
                 print(f"  âœ“ Copied logout: {original_name} â†’ {new_name}")
@@ -1176,7 +1160,9 @@ def main():
             
             # Chat - only 1 per merged file, using global queue
             chat_used = False
-            chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 else -1
+            # Insert chat in only 50% of merged files
+            should_insert_chat = rng.random() < 0.50
+            chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 and should_insert_chat else -1
             file_segments = []
             
             for i, p in enumerate(paths):
