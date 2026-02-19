@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.22.0
-Working whitelist + random file queue
+merge_macros.py - v3.23.0
+- Alphabetical naming: Raw (A,B,C) -> Ineff (D,E,F) -> Normal (G,H,I...)
+- DROP ONLY insertion for Mining folders
+- Working whitelist + random file queue
 """
 
 import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.22.0"
+VERSION = "v3.23.0"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -133,6 +135,28 @@ def format_ms_precise(ms: int) -> str:
 
 def clean_identity(name: str) -> str:
     return re.sub(r'(\s*-\s*Copy(\s*\(\d+\))?)|(\s*\(\d+\))', '', name, flags=re.IGNORECASE).strip().lower()
+
+
+def find_drop_only_files(folder_path: Path, all_files: list) -> list:
+    """
+    Find all DROP ONLY files in Mining folders (including z+100 storage).
+    Only searches if folder name contains 'mining' (case-insensitive).
+    Returns list of file paths.
+    """
+    # Check if this is a Mining folder
+    if 'mining' not in folder_path.name.lower():
+        return []
+    
+    drop_only_files = []
+    
+    # Search through all files for DROP ONLY pattern
+    for file_path in all_files:
+        filename = file_path.name.lower()
+        # Match: "drop only", "drop only1", "drop only 1", "drop only - copy", etc.
+        if 'drop only' in filename:
+            drop_only_files.append(file_path)
+    
+    return drop_only_files
 
 def extract_folder_number(folder_name: str) -> int:
     """
@@ -969,7 +993,8 @@ def main():
                     "is_ts": is_ts,
                     "macro_id": macro_id,
                     "parent_scope": parent_scope,
-                    "non_json_files": [curr / f for f in non_jsons]
+                    "non_json_files": [curr / f for f in non_jsons],
+                    "drop_only_files": find_drop_only_files(curr, file_paths)
                 }
                 
                 for fp in file_paths:
@@ -1090,13 +1115,29 @@ def main():
         raw_v   = 3   # always 3 raw (^ tag) for every folder type
         total_v = norm_v + inef_v + raw_v
 
-        # v_idx 1..norm_v              â†’ TS versions (TS folder) OR Normal (regular folder)
-        # v_idx norm_v+1..+inef_v      â†’ Inefficient ¬¬  (regular folder only, 0 for TS)
-        # v_idx ..+1..+raw_v           â†’ Raw ^            (all folders)
+        # NEW NAMING SCHEME: Raw gets A,B,C first, then Inefficient, then Normal
+        # This ensures alphabetical sorting works: ^A, ^B, ^C, ¬¬D, ¬¬E, ¬¬F, G, H, I...
+        # 
+        # Order of generation:
+        # 1. Raw files (raw_v = 3): indices 1, 2, 3 → letters A, B, C
+        # 2. Inefficient files (inef_v): indices 4, 5, 6 → letters D, E, F
+        # 3. Normal files (norm_v = 6): indices 7-12 → letters G, H, I, J, K, L
+        
         for v_idx in range(1, total_v + 1):
-            is_inef       = (norm_v < v_idx <= norm_v + inef_v)
-            is_raw        = (v_idx > norm_v + inef_v)
-            is_ts_version = is_ts and not is_raw   # first norm_v slots are TS in a TS folder
+            # Determine file type based on NEW ordering
+            if v_idx <= raw_v:
+                is_raw = True
+                is_inef = False
+                is_ts_version = False
+            elif v_idx <= raw_v + inef_v:
+                is_raw = False
+                is_inef = True
+                is_ts_version = False
+            else:
+                is_raw = False
+                is_inef = False
+                is_ts_version = is_ts  # Only normal files can be TS
+            
             v_letter = chr(64 + v_idx)
             v_code = f"{folder_number}_{v_letter}"
 
@@ -1124,6 +1165,14 @@ def main():
             
             if not paths:
                 continue
+
+            # DROP ONLY insertion for Mining folders
+            drop_only_file = None
+            if 'drop_only_files' in data and data['drop_only_files']:
+                # Randomly select ONE drop only file for this merged file
+                drop_only_file = rng.choice(data['drop_only_files'])
+                print(f"  ℹ️  Mining folder: Will insert DROP ONLY file: {drop_only_file.name}")
+
             
             # Chat - only 1 per merged file, using global queue
             chat_used = False
@@ -1265,6 +1314,52 @@ def main():
                     "is_chat": False  # Regular file
                 })
             
+
+            # INSERT DROP ONLY file if selected (Mining folders only)
+            if drop_only_file and merged:
+                # Load DROP ONLY events
+                drop_events = load_json_events(drop_only_file)
+                if drop_events:
+                    drop_events = filter_problematic_keys(drop_events)
+                    if drop_events:
+                        # Random insertion point (25-75% through file)
+                        if len(merged) > 10:
+                            drop_start_idx = int(len(merged) * 0.25)
+                            drop_end_idx = int(len(merged) * 0.75)
+                            drop_insertion_point = rng.randint(drop_start_idx, drop_end_idx)
+                            
+                            # Get time at insertion point
+                            drop_base_time = merged[drop_insertion_point].get('Time', 0)
+                            
+                            # Normalize DROP events
+                            drop_start_time = min(e.get('Time', 0) for e in drop_events)
+                            drop_file_start_idx = len(merged)
+                            for e in drop_events:
+                                e['Time'] = e['Time'] - drop_start_time + drop_base_time
+                                merged.append(e)
+                            
+                            # Calculate drop duration
+                            drop_duration = max(e.get('Time', 0) for e in drop_events) - drop_base_time
+                            
+                            # Shift all events after insertion point
+                            for j in range(drop_insertion_point, drop_file_start_idx):
+                                merged[j]['Time'] = merged[j]['Time'] + drop_duration
+                            
+                            # Update timeline
+                            if merged:
+                                timeline = merged[-1]["Time"]
+                            
+                            # Add to file segments for manifest
+                            file_segments.append({
+                                "name": f"[DROP ONLY] {drop_only_file.name}",
+                                "end_time": drop_base_time + drop_duration,
+                                "start_idx": drop_file_start_idx,
+                                "end_idx": len(merged) - 1,
+                                "is_chat": False
+                            })
+                            
+                            print(f"    ✓ Inserted DROP ONLY at {format_ms_precise(drop_base_time)}")
+
             total_afk_pool = total_idle_movements
             chat_inserted = chat_used  # Track if chat was used
             
