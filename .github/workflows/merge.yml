@@ -16,6 +16,11 @@ on:
         required: false
         default: true
         type: boolean
+      specific_folders_merge:
+        description: 'Specif. folders merge'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -60,6 +65,14 @@ jobs:
             echo "🔕 Chat inserts DISABLED"
           else
             echo "✅ Chat inserts ENABLED"
+          fi
+          
+          # Add --use-whitelist if enabled
+          if [ "${{ inputs.specific_folders_merge }}" = "true" ]; then
+            CMD="$CMD --use-whitelist"
+            echo "📋 Whitelist ENABLED (will only merge folders in 'specific folders to include for merge.txt')"
+          else
+            echo "🌐 Whitelist DISABLED (will merge ALL folders)"
           fi
           
           # Execute
