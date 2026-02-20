@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.24.7"
+VERSION = "v3.24.8"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -1249,6 +1249,9 @@ def main():
                 raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
                 total_idle_movements += idle_time
                 
+                
+                t_vals = [int(e["Time"]) for e in raw_with_movements]
+                base_t = min(t_vals)
                 
                 # Inter-file gap: 500-5000ms (non-rounded) Ã— multiplier
                 if i > 0:
