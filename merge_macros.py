@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.26.1"
+VERSION = "v3.26.2"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -205,8 +205,9 @@ def detect_rapid_click_sequences(events):
     while i < len(events):
         event = events[i]
         
-        # Only check Click events
-        if event.get("Type") != "Click":
+        # Check Click and DragStart events (both are click actions)
+        event_type = event.get("Type")
+        if event_type not in ("Click", "DragStart"):
             i += 1
             continue
         
@@ -230,8 +231,9 @@ def detect_rapid_click_sequences(events):
             if next_time - first_time > 2000:
                 break
             
-            # Check if it is a click
-            if next_event.get("Type") == "Click":
+            # Check if it's a click or drag
+            next_type = next_event.get("Type")
+            if next_type in ("Click", "DragStart"):
                 next_x = next_event.get("X")
                 next_y = next_event.get("Y")
                 
