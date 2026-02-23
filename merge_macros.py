@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.24.9"
+VERSION = "v3.26.0"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -184,6 +184,86 @@ def is_always_first_or_last_file(filename: str) -> bool:
     filename_lower = filename.lower()
     patterns = ["always first", "always last", "alwaysfirst", "alwayslast"]
     return any(pattern in filename_lower for pattern in patterns)
+
+def detect_rapid_click_sequences(events):
+    """
+    Detect sequences of rapid clicks at similar coordinates.
+    
+    Detects:
+    - Double clicks (2 clicks within 500ms, ±5 pixels)
+    - Spam clicks (3+ clicks within 2 seconds, ±10 pixels)
+    
+    Returns list of protected ranges: [(start_idx, end_idx), ...]
+    These ranges should NOT have pauses/gaps inserted between them.
+    """
+    if not events or len(events) < 2:
+        return []
+    
+    protected_ranges = []
+    
+    i = 0
+    while i < len(events):
+        event = events[i]
+        
+        # Only check Click events
+        if event.get("Type") != "Click":
+            i += 1
+            continue
+        
+        # Found a click, look for nearby clicks
+        click_sequence = [i]
+        first_time = event.get("Time", 0)
+        first_x = event.get("X")
+        first_y = event.get("Y")
+        
+        if first_x is None or first_y is None:
+            i += 1
+            continue
+        
+        # Look ahead for more clicks
+        j = i + 1
+        while j < len(events):
+            next_event = events[j]
+            next_time = next_event.get("Time", 0)
+            
+            # Stop looking if too far in time (2 seconds max)
+            if next_time - first_time > 2000:
+                break
+            
+            # Check if it is a click
+            if next_event.get("Type") == "Click":
+                next_x = next_event.get("X")
+                next_y = next_event.get("Y")
+                
+                if next_x is not None and next_y is not None:
+                    # Calculate distance from first click
+                    dist = ((next_x - first_x) ** 2 + (next_y - first_y) ** 2) ** 0.5
+                    
+                    # If within 10 pixels, part of sequence
+                    if dist <= 10:
+                        click_sequence.append(j)
+            
+            j += 1
+        
+        # If found 2+ clicks, protect the sequence
+        if len(click_sequence) >= 2:
+            start_idx = click_sequence[0]
+            end_idx = click_sequence[-1]
+            protected_ranges.append((start_idx, end_idx))
+            i = end_idx + 1
+        else:
+            i += 1
+    
+    return protected_ranges
+
+
+def is_in_protected_range(index, protected_ranges):
+    """Check if an index is within any protected range."""
+    for start, end in protected_ranges:
+        if start <= index <= end:
+            return True
+    return False
+
 
 def is_in_drag_sequence(events, index):
     """
@@ -455,26 +535,35 @@ def insert_chat_from_file(events: list, rng: random.Random, chat_files: list) ->
         print(f"  âš ï¸ Error loading chat file {chat_file.name}: {e}")
         return events, False
 
-def insert_intra_file_pauses(events: list, rng: random.Random) -> tuple:
+def insert_intra_file_pauses(events: list, rng: random.Random, protected_ranges: list = None) -> tuple:
     """
     Insert random pauses before recorded actions.
     Each file gets 1-4 random pauses (randomly chosen per file).
     Each pause is 1000-2000ms (non-rounded).
+    Protected ranges (rapid click sequences) are skipped.
     Returns (events_with_pauses, total_pause_time).
     """
     if not events or len(events) < 5:
         return events, 0
     
+    if protected_ranges is None:
+        protected_ranges = []
+    
     # Randomly decide how many pauses for this file (1-4)
     num_pauses = rng.randint(1, 4)
     
-    # Randomly select which event indices will get pauses
-    max_idx = len(events) - 1
-    if max_idx < num_pauses:
-        num_pauses = max_idx
+    # Find valid indices (not in protected ranges)
+    valid_indices = []
+    for idx in range(1, len(events)):
+        if not is_in_protected_range(idx, protected_ranges):
+            valid_indices.append(idx)
     
-    # Select random unique indices (skip first event at index 0)
-    pause_indices = rng.sample(range(1, len(events)), num_pauses)
+    if not valid_indices:
+        return events, 0
+    
+    # Select random unique indices from valid ones
+    num_pauses = min(num_pauses, len(valid_indices))
+    pause_indices = rng.sample(valid_indices, num_pauses)
     pause_indices.sort()
     
     total_pause_added = 0
@@ -1186,6 +1275,7 @@ def main():
                 # INSERT CHAT ONCE (before the chosen file index)
                 if not chat_used and i == chat_insertion_point and global_chat_queue:
                     try:
+                        chat_file = global_chat_queue.pop(0)  # Take from front
                         chat_events = load_json_events(chat_file)
                         if chat_events:
                             chat_events = filter_problematic_keys(chat_events)
@@ -1227,20 +1317,17 @@ def main():
                 
                 # Step 2: Insert random intra-file pauses between actions
                 # TIME SENSITIVE and RAW: Skip (adds time)
+                # Detect rapid click sequences to protect them
+                protected_ranges = detect_rapid_click_sequences(raw_with_jitter)
                 if not is_time_sensitive and not is_raw:
-                    raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng)
+                    raw_with_pauses, intra_pause_time = insert_intra_file_pauses(raw_with_jitter, rng, protected_ranges)
                     total_intra_pauses += intra_pause_time
                 else:
                     raw_with_pauses = raw_with_jitter
                 
                 # Step 3: Insert idle mouse movements in gaps >= 5 seconds
-                # Fills gaps with movement, does NOT add time
                 raw_with_movements, idle_time = insert_idle_mouse_movements(raw_with_pauses, rng, movement_percentage)
                 total_idle_movements += idle_time
-                
-                
-                t_vals = [int(e["Time"]) for e in raw_with_movements]
-                base_t = min(t_vals)
                 
                 # Inter-file gap: 500-5000ms (non-rounded) Ã— multiplier
                 if i > 0:
