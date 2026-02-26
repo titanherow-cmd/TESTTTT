@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.29.0"
+VERSION = "v3.31.0"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -1045,6 +1045,15 @@ def main():
         jsons = [f for f in files if f.endswith(".json") and "click_zones" not in f.lower()]
         non_jsons = [f for f in files if not f.endswith(".json")]
         
+        # Check for "dont mess with me" subfolder
+        dmwm_files = []
+        dmwm_path = curr / "dont mess with me"
+        if dmwm_path.exists() and dmwm_path.is_dir():
+            dmwm_jsons = [f for f in dmwm_path.glob("*.json") if "click_zones" not in f.name.lower()]
+            if dmwm_jsons:
+                dmwm_files = list(dmwm_jsons)
+                print(f"  ⚠️  Found 'dont mess with me' folder: {len(dmwm_files)} unmodified files (added to pool)")
+        
         if not jsons: continue
 
         # NEW: Check whitelist before processing
@@ -1077,15 +1086,18 @@ def main():
                 file_paths = [f for f in file_paths if f not in drop_only_files]
                 print(f"  Found {len(drop_only_files)} DROP ONLY file(s), excluded from regular pool")
             
-                
+            # Add "dont mess with me" files to regular pool
+            all_files = file_paths + dmwm_files
+            
             pools[key] = {
                 "rel_path": rel_path,
-                "files": file_paths,
+                "files": all_files,
                 "is_ts": is_ts,
                 "macro_id": macro_id,
                 "parent_scope": parent_scope,
                 "non_json_files": [curr / f for f in non_jsons],
-                "drop_only_files": drop_only_files
+                "drop_only_files": drop_only_files,
+                "dmwm_files": set(dmwm_files)  # Track which files are unmodified
             }
                 
             for fp in file_paths:
@@ -1266,6 +1278,9 @@ def main():
             chat_insertion_point = rng.randint(1, max(1, len(paths)-1)) if len(paths) > 1 and should_insert_chat else -1
             file_segments = []
             
+            # Get dmwm file set for this folder
+            dmwm_file_set = data.get("dmwm_files", set())
+            
             for i, p in enumerate(paths):
                 raw = load_json_events(p)
                 if not raw: continue
@@ -1273,6 +1288,9 @@ def main():
                 # Filter problematic keys
                 raw = filter_problematic_keys(raw)
                 if not raw: continue
+                
+                # Check if this file is from "dont mess with me" folder
+                is_dmwm_file = p in dmwm_file_set
                 
                 # is_time_sensitive = True only for explicitly TS versions (not normal versions in TS folders)
                 is_time_sensitive = is_ts_version
@@ -1313,12 +1331,14 @@ def main():
                         print(f"  âš ï¸ Error loading chat {chat_file.name}: {e}")
                         global_chat_queue.append(chat_file)  # Return to queue
                 
-                # Step 1: Add pre-move jitter (random 20-45% of moves)
-                # All types get jitter (doesn't affect time)
-                raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
-                total_jitter_count += jitter_count
-                total_clicks += click_count
-                jitter_percentage = jitter_pct
+                # Step 1: Add pre-move jitter (skip for dmwm files)
+                if not is_dmwm_file:
+                    raw_with_jitter, jitter_count, click_count, jitter_pct = add_pre_click_jitter(raw, rng)
+                    total_jitter_count += jitter_count
+                    total_clicks += click_count
+                    jitter_percentage = jitter_pct
+                else:
+                    raw_with_jitter = raw
                 
                 # Step 2: Insert random intra-file pauses between actions
                 # TIME SENSITIVE and RAW: Skip (adds time)
@@ -1395,12 +1415,14 @@ def main():
                 
                 timeline = merged[-1]["Time"]
                 file_end_idx = len(merged) - 1
+                # Mark dmwm files in manifest
+                file_name = f"[UNMODIFIED] {p.name}" if is_dmwm_file else p.name
                 file_segments.append({
-                    "name": p.name, 
+                    "name": file_name, 
                     "end_time": timeline,
                     "start_idx": file_start_idx,
                     "end_idx": file_end_idx,
-                    "is_chat": False  # Regular file
+                    "is_chat": False
                 })
             
 
