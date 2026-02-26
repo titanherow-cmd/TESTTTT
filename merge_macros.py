@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.26.2"
+VERSION = "v3.28.0"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -1225,9 +1225,9 @@ def main():
             v_code = f"{folder_number}_{v_letter}"
 
             if is_ts_version: mult = rng.choice([1.0, 1.2, 1.5])
-            elif is_inef:     mult = rng.choices([1, 2, 3], weights=[20, 40, 40], k=1)[0]
+            elif is_inef:     mult = rng.choices([2, 3], weights=[50, 50], k=1)[0]
             elif is_raw:      mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
-            else:             mult = rng.choices([1, 2, 3], weights=[50, 30, 20], k=1)[0]
+            else:             mult = rng.choices([1, 2], weights=[62.5, 37.5], k=1)[0]
 
             movement_percentage = rng.uniform(0.40, 0.50)
             jitter_percentage = 0.0  # Will be set per file
@@ -1235,7 +1235,7 @@ def main():
             total_idle_movements = 0
             total_intra_pauses = 0
             total_normal_pauses = 0  # NEW: Track normal file pauses
-            total_gaps = 0
+            total_inter_pauses = 0
             total_afk_pool = 0
             total_jitter_count = 0
             total_clicks = 0
@@ -1335,7 +1335,7 @@ def main():
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
                 
-                # Inter-file gap: 500-5000ms (non-rounded) Ã— multiplier
+                # Inter-file pause: 500-5000ms (non-rounded) Ã— multiplier
                 if i > 0:
                     gap = int(rng.uniform(500.123, 4999.987) * mult)
                     
@@ -1380,7 +1380,7 @@ def main():
                     gap = 0
                     
                 timeline += gap
-                total_gaps += gap
+                total_inter_pauses += gap
                 
                 file_start_idx = len(merged)  # Track where this file starts in merged array
                 
@@ -1449,15 +1449,15 @@ def main():
             chat_inserted = chat_used  # Track if chat was used
             
             # Normal File Pause: only for NORMAL files (not inef, not TS, not raw)
-            if not is_inef and not is_time_sensitive and not is_raw and merged:
-                merged, normal_pause_time = insert_normal_file_pauses(merged, rng)
-                total_normal_pauses += normal_pause_time
-                if normal_pause_time > 0:
-                    timeline = merged[-1]["Time"]
+            # DISABLED: if not is_inef and not is_time_sensitive and not is_raw and merged:
+            # DISABLED: merged, normal_pause_time = insert_normal_file_pauses(merged, rng)
+            # DISABLED: total_normal_pauses += normal_pause_time
+            # DISABLED: if normal_pause_time > 0:
+            # DISABLED: timeline = merged[-1]["Time"]
                     # Update file_segments to reflect new timeline after pauses
-                    for seg in file_segments:
-                        if seg["end_idx"] < len(merged):
-                            seg["end_time"] = merged[seg["end_idx"]]["Time"]
+            # DISABLED: for seg in file_segments:
+            # DISABLED: if seg["end_idx"] < len(merged):
+            # DISABLED: seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
             if is_inef and not data["is_ts"] and len(merged) > 1:
                 # Massive pause: 4-9 minutes (240000-540000ms)
@@ -1484,7 +1484,7 @@ def main():
             (out_f / fname).write_text(json.dumps(merged, indent=2))
             
             # Calculate pause time (idle movements are informational only)
-            total_pause = total_intra_pauses + total_gaps + total_normal_pauses
+            total_pause = total_intra_pauses + total_inter_pauses + total_normal_pauses
             
             # Determine file type
             if is_ts_version:
@@ -1497,9 +1497,9 @@ def main():
                 file_type = "Normal"
             
             # Calculate pause times
-            # Only inter-file gaps get multiplied!
+            # Only inter-file pauses get multiplied!
             original_intra = total_intra_pauses  # Not multiplied
-            original_inter = int(total_gaps / mult) if mult > 0 else total_gaps
+            original_inter = int(total_inter_pauses / mult) if mult > 0 else total_inter_pauses
             original_normal = total_normal_pauses
             original_total = original_intra + original_inter + original_normal
             
@@ -1512,13 +1512,13 @@ def main():
             separator = "=" * 40
             
             if is_raw:
-                # Raw files: minimal manifest (only inter-file gaps, no anti-detection)
+                # Raw files: minimal manifest (only inter-file pauses, no anti-detection)
                 manifest_entry = [
                     separator,
                     " ",
                     version_label,
                     f"FILE TYPE: Raw (no time-adding features, no chat)",
-                    f"  Between files pause: {format_ms_precise(total_gaps)} (x{mult} Multiplier)",
+                    f"  Between files pause: {format_ms_precise(total_inter_pauses)} (x{mult} Multiplier)",
                 ]
             else:
                 manifest_entry = [
