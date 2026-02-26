@@ -10,7 +10,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.28.0"
+VERSION = "v3.29.0"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -1123,7 +1123,10 @@ def main():
         
         original_rel_path = data["rel_path"]
         
-        out_f = bundle_dir / original_rel_path
+        # Remove D_ or d_ from folder name
+        cleaned_folder_name = re.sub(r'[Dd]_', '', original_rel_path.name)
+        cleaned_rel_path = original_rel_path.parent / cleaned_folder_name
+        out_f = bundle_dir / cleaned_rel_path
         out_f.mkdir(parents=True, exist_ok=True)
         
         if logout_file:
