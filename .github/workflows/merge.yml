@@ -1,24 +1,24 @@
-name: Merge macros (persisted counter, scan all folders, zip top-level)
+name: Merge macros (optimized v3.32.2)
 
 on:
   workflow_dispatch:
     inputs:
       enable_chat:
-        description: 'Enable chat inserts'
+        description: 'Enable chat inserts (50% of files)'
         required: false
         default: true
         type: boolean
-      specific_folders_merge:
-        description: 'Specif. folders merge'
+      use_whitelist:
+        description: 'Use whitelist from "specific folders to include for merge.txt"'
         required: false
         default: false
         type: boolean
       versions:
-        description: 'How many versions per group'
+        description: 'How many versions per folder (normal files)'
         required: true
         default: '6'
       target_minutes:
-        description: 'Target duration per merged file'
+        description: 'Target duration per merged file (minutes)'
         required: true
         default: '35'
 
@@ -68,7 +68,7 @@ jobs:
           fi
           
           # Add --use-whitelist if enabled
-          if [ "${{ inputs.specific_folders_merge }}" = "true" ]; then
+          if [ "${{ inputs.use_whitelist }}" = "true" ]; then
             CMD="$CMD --use-whitelist"
             echo "📋 Whitelist ENABLED (will only merge folders in 'specific folders to include for merge.txt')"
           else
