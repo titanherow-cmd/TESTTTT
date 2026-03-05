@@ -6,19 +6,19 @@ on:
       enable_chat:
         description: 'Enable chat inserts (50% of files)'
         required: false
-        default: true
-        type: boolean
-      use_whitelist:
-        description: 'Use whitelist (specific folders to include for merge.txt)'
-        required: false
         default: false
         type: boolean
+      use_whitelist:
+        description: 'Use specific folders only (filter mode)'
+        required: false
+        default: true
+        type: boolean
       versions:
-        description: 'How many versions per folder (normal files)'
+        description: 'Total versions to generate *'
         required: true
         default: '6'
       target_minutes:
-        description: 'Target duration per merged file (minutes)'
+        description: 'Target duration per merged file *'
         required: true
         default: '35'
 
@@ -63,9 +63,9 @@ jobs:
             echo "Chat: DISABLED"
           fi
           if [ "${{ inputs.use_whitelist }}" = "true" ]; then
-            echo "Whitelist: ENABLED"
+            echo "Specific folders: ENABLED (filter mode)"
           else
-            echo "Whitelist: DISABLED (all folders)"
+            echo "Specific folders: DISABLED (all folders)"
           fi
           echo "========================================"
         
@@ -79,12 +79,12 @@ jobs:
           CMD="$CMD --target-minutes ${{ github.event.inputs.target_minutes }}"
           CMD="$CMD --bundle-id ${{ env.BUNDLE_SEQ }}"
           
-          # Add --no-chat if disabled
+          # Add --no-chat if disabled (default is disabled)
           if [ "${{ inputs.enable_chat }}" = "false" ]; then
             CMD="$CMD --no-chat"
           fi
           
-          # Add --use-whitelist if enabled
+          # Add --use-whitelist if enabled (default is enabled)
           if [ "${{ inputs.use_whitelist }}" = "true" ]; then
             CMD="$CMD --use-whitelist"
           fi
