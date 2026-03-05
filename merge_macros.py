@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.23.0
+merge_macros.py - v3.32.1
+- NEW: Combination history system (Feature 1)
+- NEW: Smart jitter with exclusion zones + rapid click protection (Feature 2 - IMPROVED)
+- NEW: Optional folders support (Feature 3)
 - Alphabetical naming: Raw (A,B,C) -> Ineff (D,E,F) -> Normal (G,H,I...)
 - DROP ONLY insertion for Mining folders
 - Working whitelist + random file queue
@@ -10,7 +13,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.31.0"
+VERSION = "v3.32.1"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -101,6 +104,32 @@ def should_process_folder(folder_path: Path, originals_root: Path, whitelist: di
     
     return False
 
+
+def detect_optional_folders(folder_name: str, rng: random.Random) -> tuple:
+    """
+    NEW FEATURE 3: Detect if a folder is optional based on naming.
+    
+    Optional if:
+    - Starts with 0, 1, 2, 3 (e.g., "0 unmodified", "1-Mining")
+    - Contains "optional" anywhere in name
+    
+    Returns: (is_optional, optional_chance)
+    """
+    folder_lower = folder_name.lower()
+    
+    # Check for optional prefix
+    if re.match(r'^[0123][\s-]', folder_name):
+        is_optional = True
+    elif 'optional' in folder_lower:
+        is_optional = True
+    else:
+        is_optional = False
+    
+    # If optional, assign random chance (27-43%)
+    if is_optional:
+        return True, rng.uniform(0.27, 0.43)
+    else:
+        return False, 1.0  # Always include
 
 
 # Chat inserts are loaded from 'chat inserts' folder at runtime
@@ -406,78 +435,123 @@ def generate_human_path(start_x, start_y, end_x, end_y, duration_ms, rng):
 
 def add_pre_click_jitter(events: list, rng: random.Random) -> tuple:
     """
-    Add realistic pre-move jitter: before a random 20-45% of ALL mouse movements,
-    add 2-3 micro-movements around the target (Â±1-3px), then snap to exact position.
-    The percentage is randomly chosen per file (non-rounded).
+    IMPROVED SMART JITTER v3.32.1
+    
+    Add realistic jitter to 21-32% of TOTAL movements (not per-move).
+    NEVER jitter within 1 second before/after ANY click.
+    EXTRA PROTECTION for rapid click sequences (double-clicks, spam clicks).
+    
     Returns (events_with_jitter, jitter_count, total_moves, jitter_percentage).
     """
     if not events or len(events) < 2:
         return events, 0, 0, 0.0
     
-    # Randomly choose jitter percentage for this file (20-45%, non-rounded)
-    jitter_percentage = rng.uniform(0.20, 0.45)
+    # Step 1: Detect rapid click sequences (double-clicks, spam clicks)
+    protected_ranges = detect_rapid_click_sequences(events)
+    
+    # Step 2: Build exclusion zones
+    exclusion_zones = []  # List of (start_time, end_time) tuples
+    
+    # Add 1000ms buffer around ALL individual clicks
+    click_types = {'Click', 'LeftDown', 'RightDown', 'DragStart'}
+    for e in events:
+        if e.get('Type') in click_types:
+            click_time = e.get('Time', 0)
+            exclusion_zones.append((click_time - 1000, click_time + 1000))
+    
+    # Add EXTENDED buffer around rapid click sequences
+    # For sequences, extend 1500ms before first click and 1500ms after last click
+    for start_idx, end_idx in protected_ranges:
+        if start_idx < len(events) and end_idx < len(events):
+            first_click_time = events[start_idx].get('Time', 0)
+            last_click_time = events[end_idx].get('Time', 0)
+            # Extended buffer: 1500ms before/after the sequence
+            exclusion_zones.append((first_click_time - 1500, last_click_time + 1500))
+    
+    # Step 3: Find safe MouseMove events (NOT in any exclusion zone)
+    safe_movements = []
+    for i, event in enumerate(events):
+        if event.get('Type') == 'MouseMove':
+            event_time = event.get('Time', 0)
+            # Check if this time is safe (not in any exclusion zone)
+            is_safe = True
+            for zone_start, zone_end in exclusion_zones:
+                if zone_start <= event_time <= zone_end:
+                    is_safe = False
+                    break
+            
+            if is_safe:
+                safe_movements.append((i, event))
+    
+    if not safe_movements:
+        return events, 0, 0, 0.0
+    
+    # Calculate target: 21-32% of TOTAL movements
+    total_moves = sum(1 for e in events if e.get('Type') in ('MouseMove', 'Click', 'RightDown'))
+    jitter_percentage = rng.uniform(0.21, 0.32)
+    target_jitters = int(total_moves * jitter_percentage)
+    target_jitters = min(target_jitters, len(safe_movements))
+    
+    if target_jitters == 0:
+        return events, 0, total_moves, 0.0
+    
+    # Randomly select which safe movements get jitter
+    movements_to_jitter = rng.sample(safe_movements, target_jitters)
+    
+    # Sort by index (descending) to insert from end to start
+    movements_to_jitter.sort(key=lambda x: x[0], reverse=True)
     
     jitter_count = 0
-    total_moves = 0
-    i = 0
     
-    while i < len(events):
-        event = events[i]
-        event_type = event.get('Type', '')
+    # Add jitter to selected movements
+    for idx, event in movements_to_jitter:
+        move_x = event.get('X')
+        move_y = event.get('Y')
+        move_time = event.get('Time')
         
-        # Apply to ALL mouse movements (MouseMove, Click, RightDown)
-        if event_type in ('MouseMove', 'Click', 'RightDown'):
-            total_moves += 1
+        if move_x is None or move_y is None or move_time is None:
+            continue
+        
+        # Generate 2-3 micro-movements
+        num_jitters = rng.randint(2, 3)
+        time_budget = rng.randint(100, 200)
+        time_per_jitter = time_budget // (num_jitters + 1)
+        
+        current_time = move_time - time_budget
+        jitter_events = []
+        
+        for j in range(num_jitters):
+            offset_x = rng.randint(-3, 3)
+            offset_y = rng.randint(-3, 3)
             
-            # Random chance based on jitter_percentage
-            if rng.random() < jitter_percentage:
-                move_x = event.get('X')
-                move_y = event.get('Y')
-                move_time = event.get('Time')
-                
-                if move_x is not None and move_y is not None and move_time is not None:
-                    num_jitters = rng.randint(2, 3)
-                    jitter_events = []
-                    
-                    time_budget = rng.randint(100, 200)
-                    time_per_jitter = time_budget // (num_jitters + 1)
-                    
-                    current_time = move_time - time_budget
-                    
-                    for j in range(num_jitters):
-                        offset_x = rng.randint(-3, 3)
-                        offset_y = rng.randint(-3, 3)
-                        
-                        jitter_x = int(move_x) + offset_x
-                        jitter_y = int(move_y) + offset_y
-                        
-                        jitter_x = max(100, min(1800, jitter_x))
-                        jitter_y = max(100, min(1000, jitter_y))
-                        
-                        jitter_events.append({
-                            'Type': 'MouseMove',
-                            'Time': current_time,
-                            'X': jitter_x,
-                            'Y': jitter_y
-                        })
-                        
-                        current_time += time_per_jitter
-                    
-                    # Final movement: snap to EXACT target position
-                    jitter_events.append({
-                        'Type': 'MouseMove',
-                        'Time': current_time,
-                        'X': int(move_x),
-                        'Y': int(move_y)
-                    })
-                    
-                    for idx, jitter_event in enumerate(jitter_events):
-                        events.insert(i + idx, jitter_event)
-                    
-                    i += len(jitter_events)
-                    jitter_count += 1
+            jitter_x = int(move_x) + offset_x
+            jitter_y = int(move_y) + offset_y
+            
+            jitter_x = max(100, min(1800, jitter_x))
+            jitter_y = max(100, min(1000, jitter_y))
+            
+            jitter_events.append({
+                'Type': 'MouseMove',
+                'Time': current_time,
+                'X': jitter_x,
+                'Y': jitter_y
+            })
+            
+            current_time += time_per_jitter
         
-        i += 1
+        # Final snap to exact position
+        jitter_events.append({
+            'Type': 'MouseMove',
+            'Time': current_time,
+            'X': int(move_x),
+            'Y': int(move_y)
+        })
+        
+        # Insert jitter events BEFORE the target movement
+        for je in reversed(jitter_events):
+            events.insert(idx, je)
+        
+        jitter_count += 1
     
     return events, jitter_count, total_moves, jitter_percentage
 
@@ -534,7 +608,7 @@ def insert_chat_from_file(events: list, rng: random.Random, chat_files: list) ->
         return events, True
         
     except Exception as e:
-        print(f"  âš ï¸ Error loading chat file {chat_file.name}: {e}")
+        print(f"  ⚠️ Error loading chat file {chat_file.name}: {e}")
         return events, False
 
 def insert_intra_file_pauses(events: list, rng: random.Random, protected_ranges: list = None) -> tuple:
@@ -889,6 +963,93 @@ def insert_idle_mouse_movements(events, rng, movement_percentage):
     
     return result, total_idle_time
 
+
+class ManualHistoryTracker:
+    """
+    NEW FEATURE 1: Manual combination history tracker for merge_macros.
+    
+    Tracks which file combinations have been used across multiple runs.
+    Files are stored in: input_macros/combination_history/
+    Output: COMBINATION_HISTORY_{bundle_id}.txt
+    """
+    def __init__(self, all_files, rng, folder_name, input_dir):
+        self.all_files = all_files
+        self.rng = rng
+        self.folder_name = folder_name
+        self.input_dir = input_dir
+        
+        # History folder
+        self.history_dir = input_dir / "combination_history"
+        
+        # Load all combinations from history
+        self.used_combinations = self._load_all_combinations()
+        
+        # Track combinations used THIS run
+        self.current_run_combinations = []
+        
+        if self.used_combinations:
+            print(f"  📊 {len(self.used_combinations)} combinations loaded from history")
+    
+    def _load_all_combinations(self):
+        """Load all combination signatures from ALL .txt files in history folder"""
+        if not self.history_dir.exists():
+            return set()
+        
+        used = set()
+        txt_files = list(self.history_dir.glob("*.txt"))
+        
+        if not txt_files:
+            return set()
+        
+        print(f"  📂 Reading {len(txt_files)} history file(s)...")
+        
+        for hist_file in txt_files:
+            try:
+                with open(hist_file, 'r', encoding='utf-8') as f:
+                    current_folder = None
+                    for line in f:
+                        line = line.strip()
+                        
+                        # Detect folder section
+                        if line.startswith('[') and line.endswith(']'):
+                            current_folder = line[1:-1]
+                            continue
+                        
+                        # Skip empty lines and headers
+                        if not line or line.startswith('==='):
+                            continue
+                        
+                        # Only process combinations for THIS folder
+                        if current_folder and current_folder.lower() == self.folder_name.lower():
+                            if '|' in line:  # Looks like a combination signature
+                                used.add(line)
+                
+                print(f"    ✅ {hist_file.name}: Loaded")
+            except Exception as e:
+                print(f"    ⚠️  {hist_file.name}: Error - {e}")
+        
+        return used
+    
+    def get_unique_sequence(self, target_files):
+        """
+        Get a file sequence that hasn't been used before.
+        Tries to find new combination, falls back to random if exhausted.
+        """
+        # Create signature from file sequence
+        signature = "|".join(f.name for f in target_files)
+        
+        # Check if already used
+        if signature in self.used_combinations:
+            # Already used, but allow it (combination space may be exhausted)
+            pass
+        
+        # Mark as used
+        self.used_combinations.add(signature)
+        self.current_run_combinations.append(signature)
+        
+        return target_files
+
+
 class QueueFileSelector:
     def __init__(self, rng, all_files, durations_cache):
         self.rng = rng
@@ -929,7 +1090,7 @@ class QueueFileSelector:
             # File selector multiplier - CRITICAL for accuracy
             # 1.0x = too many files (overshoot 11-18 min)
             # 1.8x = too few files (undershoot 10-13 min)
-            # 1.35x = sweet spot (target Â±2-4 min)
+            # 1.35x = sweet spot (target ±2-4 min)
             if is_time_sensitive:
                 estimated_time = file_duration * 1.05  # TIME SENSITIVE: minimal overhead
             else:
@@ -971,6 +1132,15 @@ def main():
     parser.add_argument("--use-whitelist", action="store_true", help="Use whitelist from 'specific folders to include for merge.txt' (default: off)")
     args = parser.parse_args()
 
+    print("="*70)
+    print(f"MERGE MACROS {VERSION}")
+    print("="*70)
+    print(f"Bundle ID: {args.bundle_id}")
+    print(f"Target: {args.target_minutes} minutes per file")
+    print(f"Versions: {args.versions} normal")
+    print(f"Chat: {'DISABLED' if args.no_chat else 'ENABLED (50% chance)'}")
+    print("="*70)
+
     search_base = Path(args.input_root).resolve()
     if not search_base.exists():
         search_base = Path(".").resolve()
@@ -985,7 +1155,7 @@ def main():
     if not originals_root:
         originals_root = search_base
     
-    # NEW: Load folder whitelist (only if --use-whitelist flag is set)
+    # Load folder whitelist (only if --use-whitelist flag is set)
     folder_whitelist = None
     if args.use_whitelist:
         folder_whitelist = load_folder_whitelist(originals_root.parent)
@@ -1007,14 +1177,14 @@ def main():
             for test_path in [test_file, Path(str(test_file) + ".json")]:
                 if test_path.exists() and test_path.is_file():
                     logout_file = test_path
-                    print(f"âœ“ Found logout file at: {logout_file}")
+                    print(f"✓ Found logout file at: {logout_file}")
                     break
             if logout_file:
                 break
 
     bundle_dir = args.output_root / f"merged_bundle_{args.bundle_id}"
     bundle_dir.mkdir(parents=True, exist_ok=True)
-    rng = random.Random()
+    rng = random.Random(args.bundle_id * 42)  # Seed with bundle ID for reproducibility
     pools = {}
     durations_cache = {}
     
@@ -1025,13 +1195,13 @@ def main():
         if chat_dir.exists() and chat_dir.is_dir():
             chat_files = list(chat_dir.glob("*.json"))
             if chat_files:
-                print(f"âœ“ Found {len(chat_files)} chat insert files in: {chat_dir}")
+                print(f"✓ Found {len(chat_files)} chat insert files in: {chat_dir}")
             else:
-                print(f"âš ï¸ 'chat inserts' folder exists but is empty: {chat_dir}")
+                print(f"⚠️ 'chat inserts' folder exists but is empty: {chat_dir}")
         else:
-            print(f"âš ï¸ No 'chat inserts' folder found (will skip chat inserts)")
+            print(f"⚠️ No 'chat inserts' folder found (will skip chat inserts)")
     else:
-        print(f"ðŸ”• Chat inserts DISABLED (--no-chat flag)")
+        print(f"🔕 Chat inserts DISABLED (--no-chat flag)")
 
     # Track skipped and processed folders for summary
     skipped_folders = []
@@ -1056,7 +1226,7 @@ def main():
         
         if not jsons: continue
 
-        # NEW: Check whitelist before processing
+        # Check whitelist before processing
         if not should_process_folder(curr, originals_root, folder_whitelist):
             skipped_folders.append(curr.name)
             continue
@@ -1115,8 +1285,9 @@ def main():
     global_chat_queue = list(chat_files) if chat_files else []
     if global_chat_queue:
         rng.shuffle(global_chat_queue)
-        print(f"ðŸ”„ Initialized global chat queue with {len(global_chat_queue)} files (shuffled)")
+        print(f"🔄 Initialized global chat queue with {len(global_chat_queue)} files (shuffled)")
     
+    # NEW FEATURE 3: Detect optional folders and assign random inclusion chance
     for key, data in pools.items():
         folder_name = data["rel_path"].name
         folder_number = extract_folder_number(folder_name)
@@ -1125,8 +1296,26 @@ def main():
             print(f"WARNING: No number found in folder name '{folder_name}', using 0")
         
         data["folder_number"] = folder_number
+        
+        # Detect optional folders
+        is_optional, optional_chance = detect_optional_folders(folder_name, rng)
+        data["is_optional"] = is_optional
+        data["optional_chance"] = optional_chance
+        
+        if is_optional:
+            print(f"  🎲 Optional folder: {folder_name} ({int(optional_chance * 100)}% chance)")
+    
+    # NEW FEATURE 1: Track combinations at bundle level
+    bundle_combinations = {}
     
     for key, data in pools.items():
+        # NEW FEATURE 3: Check if optional folder should be skipped
+        if data.get("is_optional", False):
+            optional_chance = data.get("optional_chance", 1.0)
+            if rng.random() >= optional_chance:
+                print(f"  ⏭️  Skipping optional folder: {data['rel_path'].name}")
+                continue
+        
         folder_number = data["folder_number"]
         
         if not data["files"]:
@@ -1141,6 +1330,15 @@ def main():
         out_f = bundle_dir / cleaned_rel_path
         out_f.mkdir(parents=True, exist_ok=True)
         
+        # NEW FEATURE 1: Initialize combination history tracker
+        input_root = originals_root.parent if originals_root.parent.exists() else originals_root
+        tracker = ManualHistoryTracker(
+            data["files"],
+            rng,
+            cleaned_folder_name,
+            input_root
+        )
+        
         if logout_file:
             try:
                 original_name = logout_file.name
@@ -1149,46 +1347,43 @@ def main():
                     # Has dash: "- logout.json" → "@ LOGOUT.JSON"
                     new_name = "@ " + original_name[1:].strip().upper()
                 else:
-                    # Add @ prefix: "logout.json" â†’ "- 46 LOGOUT.JSON"
+                    # Add @ prefix: "logout.json" → "@ LOGOUT.JSON"
                     new_name = "@ " + original_name.upper()
                 logout_dest = out_f / new_name
                 shutil.copy2(logout_file, logout_dest)
-                print(f"  âœ“ Copied logout: {original_name} â†’ {new_name}")
+                print(f"  ✓ Copied logout: {original_name} → {new_name}")
             except Exception as e:
-                print(f"  âœ— Error copying {logout_file.name}: {e}")
+                print(f"  ✗ Error copying {logout_file.name}: {e}")
         else:
-            print(f"  âš  Warning: No logout file found")
+            print(f"  ⚠  Warning: No logout file found")
         
         if "non_json_files" in data and data["non_json_files"]:
             for non_json_file in data["non_json_files"]:
                 try:
                     original_name = non_json_file.name
-                    # Keep @ prefix if present: "RuneLite_file.png" â†’ "- 46 RuneLite_file.png"
+                    # Keep @ prefix if present
                     if original_name.startswith("-"):
-                        # Already has @ prefix: "- file.png" â†’ "- 46 file.png"
                         new_name = f"@ {folder_number} {original_name[1:].strip()}"
                     else:
-                        # Add @ prefix: "file.png" â†’ "- 46 file.png"
                         new_name = f"@ {folder_number} {original_name}"
                     shutil.copy2(non_json_file, out_f / new_name)
-                    print(f"  âœ“ Copied non-JSON file: {original_name} â†’ {new_name}")
+                    print(f"  ✓ Copied non-JSON file: {original_name} → {new_name}")
                 except Exception as e:
-                    print(f"  âœ— Error copying {non_json_file.name}: {e}")
+                    print(f"  ✗ Error copying {non_json_file.name}: {e}")
         
         if "always_files" in data and data["always_files"]:
             for always_file in data["always_files"]:
                 try:
                     original_name = Path(always_file).name
-                    # Add folder number prefix: "- always first.json" â†’ "- 46 always first.json"
-                    # Handle files starting with "-" or "always"
+                    # Add folder number prefix
                     if original_name.startswith("-"):
                         new_name = f"@ {folder_number} {original_name[1:].strip()}"
                     else:
                         new_name = f"@ {folder_number} {original_name}"
                     shutil.copy2(always_file, out_f / new_name)
-                    print(f"  âœ“ Copied 'always' file: {original_name} â†’ {new_name}")
+                    print(f"  ✓ Copied 'always' file: {original_name} → {new_name}")
                 except Exception as e:
-                    print(f"  âœ— Error copying {Path(always_file).name}: {e}")
+                    print(f"  ✗ Error copying {Path(always_file).name}: {e}")
         
         total_original_ms = sum(durations_cache.get(f, 0) for f in data["files"])
         
@@ -1202,8 +1397,6 @@ def main():
             " "
         ]
         
-        # Note: global_chat_queue is created BEFORE folder loop (persists across all folders)
-        
         norm_v = args.versions
         is_ts  = data["is_ts"]
 
@@ -1214,12 +1407,6 @@ def main():
         total_v = norm_v + inef_v + raw_v
 
         # NEW NAMING SCHEME: Raw gets A,B,C first, then Inefficient, then Normal
-        # This ensures alphabetical sorting works: ^A, ^B, ^C, ¬¬D, ¬¬E, ¬¬F, G, H, I...
-        # 
-        # Order of generation:
-        # 1. Raw files (raw_v = 3): indices 1, 2, 3 → letters A, B, C
-        # 2. Inefficient files (inef_v): indices 4, 5, 6 → letters D, E, F
-        # 3. Normal files (norm_v = 6): indices 7-12 → letters G, H, I, J, K, L
         
         for v_idx in range(1, total_v + 1):
             # Determine file type based on NEW ordering
@@ -1249,7 +1436,7 @@ def main():
             
             total_idle_movements = 0
             total_intra_pauses = 0
-            total_normal_pauses = 0  # NEW: Track normal file pauses
+            total_normal_pauses = 0
             total_inter_pauses = 0
             total_afk_pool = 0
             total_jitter_count = 0
@@ -1263,6 +1450,9 @@ def main():
             
             if not paths:
                 continue
+
+            # NEW FEATURE 1: Track this combination
+            paths = tracker.get_unique_sequence(paths)
 
             # DROP ONLY insertion for Mining folders (1 file in middle)
             drop_only_file = None
@@ -1328,7 +1518,7 @@ def main():
                                     global_chat_queue = list(chat_files)
                                     rng.shuffle(global_chat_queue)
                     except Exception as e:
-                        print(f"  âš ï¸ Error loading chat {chat_file.name}: {e}")
+                        print(f"  ⚠️ Error loading chat {chat_file.name}: {e}")
                         global_chat_queue.append(chat_file)  # Return to queue
                 
                 # Step 1: Add pre-move jitter (skip for dmwm files)
@@ -1358,19 +1548,17 @@ def main():
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
                 
-                # Inter-file pause: 500-5000ms (non-rounded) Ã— multiplier
+                # Inter-file pause: 500-5000ms (non-rounded) × multiplier
                 if i > 0:
                     gap = int(rng.uniform(500.123, 4999.987) * mult)
                     
-                    # CRITICAL: Add cursor transition during gap to prevent teleporting
-                    # Get last cursor position from previous file (must have non-None X/Y)
+                    # Add cursor transition during gap to prevent teleporting
                     last_cursor_event = None
                     for e in reversed(merged):
                         if e.get('X') is not None and e.get('Y') is not None:
                             last_cursor_event = e
                             break
                     
-                    # Get first cursor position from current file (must have non-None X/Y)
                     first_cursor_event = None
                     for e in raw_with_movements:
                         if e.get('X') is not None and e.get('Y') is not None:
@@ -1424,10 +1612,6 @@ def main():
                     "end_idx": file_end_idx,
                     "is_chat": False
                 })
-            
-
-
-
 
             # INSERT DROP ONLY file in middle (Mining folders only)
             if drop_only_file and merged and len(merged) > 10:
@@ -1472,17 +1656,6 @@ def main():
 
             total_afk_pool = total_idle_movements
             chat_inserted = chat_used  # Track if chat was used
-            
-            # Normal File Pause: only for NORMAL files (not inef, not TS, not raw)
-            # DISABLED: if not is_inef and not is_time_sensitive and not is_raw and merged:
-            # DISABLED: merged, normal_pause_time = insert_normal_file_pauses(merged, rng)
-            # DISABLED: total_normal_pauses += normal_pause_time
-            # DISABLED: if normal_pause_time > 0:
-            # DISABLED: timeline = merged[-1]["Time"]
-                    # Update file_segments to reflect new timeline after pauses
-            # DISABLED: for seg in file_segments:
-            # DISABLED: if seg["end_idx"] < len(merged):
-            # DISABLED: seg["end_time"] = merged[seg["end_idx"]]["Time"]
             
             if is_inef and not data["is_ts"] and len(merged) > 1:
                 # Massive pause: 4-9 minutes (240000-540000ms)
@@ -1578,6 +1751,34 @@ def main():
             manifest.append("\n".join(manifest_entry))
 
         (out_f / f"!_MANIFEST_{folder_number}_!.txt").write_text("\n".join(manifest))
+        
+        # NEW FEATURE 1: Store combinations for this folder
+        if tracker.current_run_combinations:
+            bundle_combinations[cleaned_folder_name] = tracker.current_run_combinations
+    
+    # NEW FEATURE 1: Write combination history file at bundle level
+    if bundle_combinations:
+        combo_file = args.output_root / f"COMBINATION_HISTORY_{args.bundle_id}.txt"
+        try:
+            with open(combo_file, 'w') as f:
+                f.write(f"=== BUNDLE {args.bundle_id} COMBINATION HISTORY ===\n\n")
+                
+                for folder_name in sorted(bundle_combinations.keys()):
+                    combos = bundle_combinations[folder_name]
+                    f.write(f"[{folder_name}]\n")
+                    for combo in combos:
+                        f.write(f"{combo}\n")
+                    f.write(f"\n")
+            
+            total_combos = sum(len(c) for c in bundle_combinations.values())
+            print(f"\n✅ Combination file written: {combo_file.name}")
+            print(f"   Total combinations: {total_combos} across {len(bundle_combinations)} folders")
+        except Exception as e:
+            print(f"\n❌ ERROR writing combination file: {e}")
+    
+    print("\n" + "="*70)
+    print("MERGE COMPLETE!")
+    print("="*70)
 
 if __name__ == "__main__":
     main()
