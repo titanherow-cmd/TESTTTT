@@ -9,7 +9,7 @@ on:
         default: true
         type: boolean
       use_whitelist:
-        description: 'Use whitelist from "specific folders to include for merge.txt"'
+        description: 'Use whitelist (specific folders to include for merge.txt)'
         required: false
         default: false
         type: boolean
@@ -48,6 +48,26 @@ jobs:
             VAL=1
           fi
           echo "BUNDLE_SEQ=$VAL" >> "$GITHUB_ENV"
+      
+      - name: Display settings
+        run: |
+          echo "========================================"
+          echo "MERGE MACROS v3.32.2"
+          echo "========================================"
+          echo "Bundle ID: ${{ env.BUNDLE_SEQ }}"
+          echo "Versions: ${{ github.event.inputs.versions }}"
+          echo "Target: ${{ github.event.inputs.target_minutes }} minutes"
+          if [ "${{ inputs.enable_chat }}" = "true" ]; then
+            echo "Chat: ENABLED (50% of files)"
+          else
+            echo "Chat: DISABLED"
+          fi
+          if [ "${{ inputs.use_whitelist }}" = "true" ]; then
+            echo "Whitelist: ENABLED"
+          else
+            echo "Whitelist: DISABLED (all folders)"
+          fi
+          echo "========================================"
         
       - name: Execute macro merge script
         run: |
@@ -62,21 +82,16 @@ jobs:
           # Add --no-chat if disabled
           if [ "${{ inputs.enable_chat }}" = "false" ]; then
             CMD="$CMD --no-chat"
-            echo "🔕 Chat inserts DISABLED"
-          else
-            echo "✅ Chat inserts ENABLED (50% of files)"
           fi
           
           # Add --use-whitelist if enabled
           if [ "${{ inputs.use_whitelist }}" = "true" ]; then
             CMD="$CMD --use-whitelist"
-            echo "📋 Whitelist ENABLED (will only merge folders in 'specific folders to include for merge.txt')"
-          else
-            echo "🌐 Whitelist DISABLED (will merge ALL folders)"
           fi
           
           # Execute
           echo "Running: $CMD"
+          echo ""
           $CMD
             
       - name: Commit and Push Counter Update
@@ -95,12 +110,15 @@ jobs:
           BUNDLE_NAME="merged_bundle_${{ env.BUNDLE_SEQ }}"
           ZIP_FILE="merged_macros_${{ env.BUNDLE_SEQ }}.zip"
           
+          echo "Creating ZIP from: output/$BUNDLE_NAME"
           ls -R output/
           
           if [ -d "output/$BUNDLE_NAME" ]; then
             cd output && zip -r "../$ZIP_FILE" "$BUNDLE_NAME"
+            cd ..
+            echo "✓ Created: $ZIP_FILE"
           else
-            echo "Error: Directory output/$BUNDLE_NAME was not found!"
+            echo "✗ Error: Directory output/$BUNDLE_NAME was not found!"
             exit 1
           fi
           echo "FINAL_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
@@ -110,3 +128,4 @@ jobs:
         with:
           name: merged_macros_bundle_${{ env.BUNDLE_SEQ }}
           path: ${{ env.FINAL_ZIP }}
+          retention-days: 90
