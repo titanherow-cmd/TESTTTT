@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-merge_macros.py - v3.32.1
+merge_macros.py - v3.32.2
+- OPTIMIZED: 4-phase cursor transitions (from string_macros - better click protection)
 - NEW: Combination history system (Feature 1)
-- NEW: Smart jitter with exclusion zones + rapid click protection (Feature 2 - IMPROVED)
+- NEW: Smart jitter with exclusion zones + rapid click protection (Feature 2)
 - NEW: Optional folders support (Feature 3)
 - Alphabetical naming: Raw (A,B,C) -> Ineff (D,E,F) -> Normal (G,H,I...)
 - DROP ONLY insertion for Mining folders
@@ -13,7 +14,7 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.32.1"
+VERSION = "v3.32.2"
 
 
 def load_folder_whitelist(root_path: Path) -> dict:
@@ -1548,11 +1549,19 @@ def main():
                 t_vals = [int(e["Time"]) for e in raw_with_movements]
                 base_t = min(t_vals)
                 
-                # Inter-file pause: 500-5000ms (non-rounded) × multiplier
+                # OPTIMIZED 4-PHASE CURSOR TRANSITION (from string_macros)
                 if i > 0:
-                    gap = int(rng.uniform(500.123, 4999.987) * mult)
+                    # Phase 1: Pre-file pause (click release protection)
+                    # Ensures any clicks from previous file are fully released
+                    pre_file_pause = int(rng.uniform(800.0, 1500.0) * mult)
+                    timeline += pre_file_pause
                     
-                    # Add cursor transition during gap to prevent teleporting
+                    # Phase 2: Post-pause delay (preparation time)
+                    # Simulates player preparing for next action
+                    post_pause_delay = int(rng.uniform(500.0, 1000.0) * mult)
+                    timeline += post_pause_delay
+                    
+                    # Get cursor positions
                     last_cursor_event = None
                     for e in reversed(merged):
                         if e.get('X') is not None and e.get('Y') is not None:
@@ -1565,28 +1574,44 @@ def main():
                             first_cursor_event = e
                             break
                     
-                    # If both exist and positions differ, add smooth transition
+                    # Phase 3: Fast cursor transition (200-400ms dedicated movement)
                     if last_cursor_event and first_cursor_event:
                         last_x, last_y = int(last_cursor_event['X']), int(last_cursor_event['Y'])
                         first_x, first_y = int(first_cursor_event['X']), int(first_cursor_event['Y'])
                         
-                        # Only add transition if positions are different
+                        # Only transition if positions differ
                         if (last_x != first_x) or (last_y != first_y):
+                            # Fast dedicated transition (more realistic than slow gradual)
+                            transition_duration = int(rng.uniform(200, 400))
+                            
                             transition_path = generate_human_path(
                                 last_x, last_y,
                                 first_x, first_y,
-                                gap,
+                                transition_duration,
                                 rng
                             )
                             
+                            # Add transition movements
                             for rel_time, x, y in transition_path:
-                                if rel_time < gap:
-                                    merged.append({
-                                        'Type': 'MouseMove',
-                                        'Time': timeline + rel_time,
-                                        'X': x,
-                                        'Y': y
-                                    })
+                                merged.append({
+                                    'Type': 'MouseMove',
+                                    'Time': timeline + rel_time,
+                                    'X': x,
+                                    'Y': y
+                                })
+                            
+                            timeline += transition_duration
+                            
+                            # Phase 4: Explicit final position (guarantees accuracy)
+                            merged.append({
+                                'Type': 'MouseMove',
+                                'Time': timeline,
+                                'X': first_x,
+                                'Y': first_y
+                            })
+                    
+                    # Update total inter-pause tracking
+                    gap = pre_file_pause + post_pause_delay
                 else:
                     gap = 0
                     
