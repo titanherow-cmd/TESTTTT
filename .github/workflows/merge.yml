@@ -1,4 +1,4 @@
-name: Merge macros (optimized v3.32.2)
+name: Merge macros (optimized v3.32.4)
 
 on:
   workflow_dispatch:
@@ -21,6 +21,11 @@ on:
         description: 'Target duration per merged file *'
         required: true
         default: '35'
+      specific_folders_input:
+        description: 'Specific folders to include (one per line, leave empty to use saved list)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -49,10 +54,36 @@ jobs:
           fi
           echo "BUNDLE_SEQ=$VAL" >> "$GITHUB_ENV"
       
+      - name: Process specific folders input
+        id: process_folders
+        run: |
+          SPECIFIC_INPUT="${{ github.event.inputs.specific_folders_input }}"
+          SAVED_FILE=".github/specific folders to include for merge.txt"
+          
+          if [ -n "$SPECIFIC_INPUT" ]; then
+            # User provided input - SAVE IT to permanent file
+            mkdir -p .github
+            echo "$SPECIFIC_INPUT" > "$SAVED_FILE"
+            echo "FOLDERS_FILE=$SAVED_FILE" >> "$GITHUB_ENV"
+            echo "FOLDERS_SOURCE=UI input (saved to $SAVED_FILE)" >> "$GITHUB_ENV"
+            echo "FOLDERS_UPDATED=true" >> "$GITHUB_ENV"
+            echo "✓ Saved UI input to $SAVED_FILE for future runs"
+          elif [ -f "$SAVED_FILE" ]; then
+            # Use existing saved file
+            echo "FOLDERS_FILE=$SAVED_FILE" >> "$GITHUB_ENV"
+            echo "FOLDERS_SOURCE=existing saved file ($SAVED_FILE)" >> "$GITHUB_ENV"
+            echo "FOLDERS_UPDATED=false" >> "$GITHUB_ENV"
+          else
+            # No input and no file
+            echo "FOLDERS_FILE=" >> "$GITHUB_ENV"
+            echo "FOLDERS_SOURCE=none (will process ALL folders)" >> "$GITHUB_ENV"
+            echo "FOLDERS_UPDATED=false" >> "$GITHUB_ENV"
+          fi
+      
       - name: Display settings
         run: |
           echo "========================================"
-          echo "MERGE MACROS v3.32.2"
+          echo "MERGE MACROS v3.32.4"
           echo "========================================"
           echo "Bundle ID: ${{ env.BUNDLE_SEQ }}"
           echo "Versions: ${{ github.event.inputs.versions }}"
@@ -63,7 +94,12 @@ jobs:
             echo "Chat: DISABLED"
           fi
           if [ "${{ inputs.use_whitelist }}" = "true" ]; then
-            echo "Specific folders: ENABLED (filter mode)"
+            echo "Specific folders: ENABLED"
+            echo "Source: ${{ env.FOLDERS_SOURCE }}"
+            if [ -n "${{ env.FOLDERS_FILE }}" ]; then
+              echo "Folders:"
+              cat "${{ env.FOLDERS_FILE }}"
+            fi
           else
             echo "Specific folders: DISABLED (all folders)"
           fi
@@ -85,8 +121,8 @@ jobs:
           fi
           
           # Add --use-whitelist if enabled (default is enabled)
-          if [ "${{ inputs.use_whitelist }}" = "true" ]; then
-            CMD="$CMD --use-whitelist"
+          if [ "${{ inputs.use_whitelist }}" = "true" ] && [ -n "${{ env.FOLDERS_FILE }}" ]; then
+            CMD="$CMD --use-whitelist ${{ env.FOLDERS_FILE }}"
           fi
           
           # Execute
@@ -94,15 +130,26 @@ jobs:
           echo ""
           $CMD
             
-      - name: Commit and Push Counter Update
+      - name: Commit and Push Updates
         run: |
           NEW_VAL=$((BUNDLE_SEQ + 1))
           mkdir -p .github
           echo "$NEW_VAL" > .github/merge_bundle_counter.txt
+          
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Add counter
           git add .github/merge_bundle_counter.txt
-          git commit -m "Increment bundle counter to $NEW_VAL" || echo "No changes"
+          
+          # Also add folders file if it was updated from UI input
+          if [ "${{ env.FOLDERS_UPDATED }}" = "true" ]; then
+            git add ".github/specific folders to include for merge.txt"
+            git commit -m "Update merge folders list and increment counter to $NEW_VAL" || echo "No changes"
+          else
+            git commit -m "Increment bundle counter to $NEW_VAL" || echo "No changes"
+          fi
+          
           git push || echo "Push failed"
             
       - name: Create ZIP artifact
