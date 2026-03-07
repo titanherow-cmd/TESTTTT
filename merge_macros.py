@@ -14,30 +14,39 @@ import argparse, json, random, re, sys, os, math, shutil
 from pathlib import Path
 
 # Script version
-VERSION = "v3.32.2"
+VERSION = "v3.32.3"
 
 
-def load_folder_whitelist(root_path: Path) -> dict:
+def load_folder_whitelist(whitelist_path: str = None, root_path: Path = None) -> dict:
     """
-    Load folder whitelist from 'specific folders to include for merge' file.
+    Load folder whitelist from specified file or search for default file.
     Returns dict with 'folders' and 'parent_folders' sets (None = process all).
     
     Parent folders (Desktop, Mobile) include ALL their subfolders.
     Specific folders (1-Mining) include only that folder.
     """
-    possible_names = [
-        "specific folders to include for merge",
-        "specific folders to include for merge.txt",
-        "SPECIFIC FOLDERS TO INCLUDE FOR MERGE",
-        "SPECIFIC FOLDERS TO INCLUDE FOR MERGE.TXT",
-    ]
-    
     whitelist_file = None
-    for name in possible_names:
-        test_file = root_path / name
-        if test_file.exists():
-            whitelist_file = test_file
-            break
+    
+    # If specific path provided, use it
+    if whitelist_path:
+        whitelist_file = Path(whitelist_path)
+        if not whitelist_file.exists():
+            print(f"⚠️ Whitelist file not found: {whitelist_path}")
+            return None
+    # Otherwise search for default file names in root_path
+    elif root_path:
+        possible_names = [
+            "specific folders to include for merge",
+            "specific folders to include for merge.txt",
+            "SPECIFIC FOLDERS TO INCLUDE FOR MERGE",
+            "SPECIFIC FOLDERS TO INCLUDE FOR MERGE.TXT",
+        ]
+        
+        for name in possible_names:
+            test_file = root_path / name
+            if test_file.exists():
+                whitelist_file = test_file
+                break
     
     if not whitelist_file:
         return None
@@ -1130,7 +1139,7 @@ def main():
     parser.add_argument("--bundle-id", type=int, required=True)
     parser.add_argument("--speed-range", type=str, default="1.0 1.0")
     parser.add_argument("--no-chat", action="store_true", help="Disable chat inserts (default: enabled)")
-    parser.add_argument("--use-whitelist", action="store_true", help="Use whitelist from 'specific folders to include for merge.txt' (default: off)")
+    parser.add_argument("--use-whitelist", type=str, help="Path to whitelist file with specific folder names (one per line)")
     args = parser.parse_args()
 
     print("="*70)
@@ -1156,12 +1165,12 @@ def main():
     if not originals_root:
         originals_root = search_base
     
-    # Load folder whitelist (only if --use-whitelist flag is set)
+    # Load folder whitelist (only if --use-whitelist provided with file path)
     folder_whitelist = None
     if args.use_whitelist:
-        folder_whitelist = load_folder_whitelist(originals_root.parent)
+        folder_whitelist = load_folder_whitelist(whitelist_path=args.use_whitelist)
         if folder_whitelist is None:
-            print("⚠️  --use-whitelist flag set but no whitelist file found or file is empty")
+            print(f"⚠️  Whitelist file not found or empty: {args.use_whitelist}")
             print("    Will process ALL folders")
     else:
         print("📋 Whitelist is DISABLED (--use-whitelist flag not set)")
