@@ -109,26 +109,29 @@ jobs:
         run: |
           mkdir -p output
           
-          # Build command
-          CMD="python3 merge_macros.py input_macros output"
-          CMD="$CMD --versions ${{ github.event.inputs.versions }}"
-          CMD="$CMD --target-minutes ${{ github.event.inputs.target_minutes }}"
-          CMD="$CMD --bundle-id ${{ env.BUNDLE_SEQ }}"
+          # Build arguments array
+          ARGS=(
+            "input_macros"
+            "output"
+            "--versions" "${{ github.event.inputs.versions }}"
+            "--target-minutes" "${{ github.event.inputs.target_minutes }}"
+            "--bundle-id" "${{ env.BUNDLE_SEQ }}"
+          )
           
-          # Add --no-chat if disabled (default is disabled)
+          # Add --no-chat if disabled
           if [ "${{ inputs.enable_chat }}" = "false" ]; then
-            CMD="$CMD --no-chat"
+            ARGS+=("--no-chat")
           fi
           
-          # Add --use-whitelist if enabled (default is enabled)
+          # Add --use-whitelist if enabled
           if [ "${{ inputs.use_whitelist }}" = "true" ] && [ -n "${{ env.FOLDERS_FILE }}" ]; then
-            CMD="$CMD --use-whitelist \"${{ env.FOLDERS_FILE }}\""
+            ARGS+=("--use-whitelist" "${{ env.FOLDERS_FILE }}")
           fi
           
           # Execute
-          echo "Running: $CMD"
+          echo "Running: python3 merge_macros.py ${ARGS[@]}"
           echo ""
-          $CMD
+          python3 merge_macros.py "${ARGS[@]}"
             
       - name: Commit and Push Updates
         run: |
